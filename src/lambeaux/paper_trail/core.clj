@@ -11,65 +11,82 @@
 (defn trace-fn [])
 (defn report->log [])
 
+;; need a better way to determine if something is in
+;; clojure core proper, maybe by using the namespace?
+;; or generate a set of vars/symbols?
 (def core-fn? #{'map 'filter 'remove 'into})
+
+;; ---------------------------------------------------------
+;; Tracking
+;; ---------------------------------------------------------
 
 (def logs (atom []))
 
-(defn do-println [x]
-  (swap! logs conj [:print x])
+(defn add-log [label x]
+  (swap! logs conj [:print label x])
   x)
 
 (defn spy
-  ([x]
-   (swap! logs conj [:spy x])
-   x)
-  ([label x]
-   (swap! logs conj [:spy label x])
-   x))
+  [label x]
+  (swap! logs conj [:spy label x])
+  x)
+
+;; ---------------------------------------------------------
+;; Descendent Recursive Interpreter
+;; ---------------------------------------------------------
 
 (declare handle-form)
 
-(defn accessible-fn? [sym]
-  (when-let [resolved (resolve sym)]
-    (fn? @resolved)))
+(defn accessible-macro? [obj]
+  (try
+    (when-let [resolved (resolve obj)]
+      (boolean (:macro (meta resolved))))
+    (catch Exception _e false)))
 
-(defn ->fn [sym]
+(defn accessible-fn? [obj]
+  (try
+    (when-let [resolved (resolve obj)]
+      (fn? @resolved))
+    (catch Exception _e false)))
+
+(defn ->impl [sym]
   @(resolve sym))
 
 (defn handle-list
   [{:keys [reports] :as ctx} [verb & args :as in-form]]
-  (do-println [:handle-list in-form])
-  (flush)
+  (add-log :handle-list in-form)
   (cond
-    (= verb 'defn)
-    (handle-form ctx (last args))
-    (= verb 'fn*)
-    (assoc ctx :value (eval (spy :fn* in-form)))
+    ;; ---- special verbs ----
+    (= verb 'defn) (handle-form ctx (last args))
+    ;; need to eval fn* because its not in clojure core
+    (= verb 'fn*) (assoc ctx :value (eval (spy :fn* in-form)))
+    ;; ---- verb is known and invokable ----
+    (accessible-macro? verb)
+    (handle-list ctx (spy :expanded (macroexpand in-form)))
     (accessible-fn? verb)
     (let [form (doall (cons verb
                             (->> (spy :args args)
                                  (map (partial handle-form ctx))
                                  (map :value))))
-          _ (do-println [:form form])
-          result (apply (->fn verb) (rest form))
-          _ (do-println [:result result])]
-      (spy :ctx (assoc ctx
-                       :reports (conj reports {:form form :result result})
-                       :value result)))
+          result (apply (->impl verb)
+                        (map #(if (accessible-fn? %) (->impl %) %)
+                             (rest form)))]
+      (add-log :form form)
+      (add-log :result result)
+      (swap! reports conj {:form form :result result})
+      (spy :ctx (assoc ctx :value result)))
+    ;; ---- catch all ----
     :else
     (throw (ex-info "Unknown handle-list case"
                     (assoc ctx :form in-form)))))
 
 (defn handle-form
   [{:keys [arg-map] :as ctx} form]
-  (do-println [:handle-form form])
-  (flush)
+  (add-log :handle-form form)
   (cond
     (list? form) (handle-list ctx form)
     (instance? clojure.lang.Cons form) (handle-list ctx form)
-    ;; returning the fn impl here makes the src form look wonky
-    ;; probably want both the symbol and fn impl
-    (accessible-fn? form) (assoc ctx :value (->fn form))
+    (accessible-fn? form) (assoc ctx :value form)
     (symbol? form) (assoc ctx :value (spy :argmap (arg-map form)))
     :else (throw (ex-info "Unknown handle-form case"
                           (assoc ctx :form form)))))
@@ -84,10 +101,12 @@
         arg-map (into {} (map-indexed (fn [i v] [v (nth args i)])
                                       fn-arglist))
         fn-source (binding [*read-eval* false]
-                    (read-string (repl/source-fn (symbol fn-var))))]
-    (handle-form {:reports []
-                  :fn-var fn-var
-                  :fn-meta fn-meta
-                  :fn-arglist fn-arglist
-                  :arg-map arg-map
-                  :fn-source fn-source} fn-source)))
+                    (read-string (repl/source-fn (symbol fn-var))))
+        initial-ctx {:reports (atom [])
+                     :fn-var fn-var
+                     :fn-meta fn-meta
+                     :fn-arglist fn-arglist
+                     :arg-map arg-map
+                     :fn-source fn-source}
+        {:keys [reports value]} (handle-form initial-ctx fn-source)]
+    (assoc {} :source fn-source :trace @reports :result value)))
