@@ -86,6 +86,9 @@
   (cond
     (list? form) (handle-list ctx form)
     (instance? clojure.lang.Cons form) (handle-list ctx form)
+    (vector? form) (assoc ctx :value (doall (->> form 
+                                                 (map (partial handle-form ctx))
+                                                 (mapv :value))))
     (accessible-fn? form) (assoc ctx :value form)
     (symbol? form) (assoc ctx :value (spy :argmap (arg-map form)))
     :else (throw (ex-info "Unknown handle-form case"

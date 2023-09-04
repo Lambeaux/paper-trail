@@ -13,3 +13,11 @@
   (into (vector)
         (comp (map inc) (filter even?) (remove #(< % 10)))
         num-seq))
+
+(defn simple-transform-as-vector [num-seq]
+  [(first num-seq)
+   (rest num-seq)])
+
+(defn simple-transform-with-nested-vector [num-seq]
+  (apply concat [(filterv even? (map inc num-seq))
+                 (filterv odd? (map inc num-seq))]))
