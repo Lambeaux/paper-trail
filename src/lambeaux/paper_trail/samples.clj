@@ -65,3 +65,21 @@
   ([a b] (+ 1 a b))
   ([a] (+ 1 a))
   ([a b & inputs] (apply + a b inputs)))
+
+(defn fn-with-seq-destructuring
+  [n [x & xs :as coll]]
+  (hash-map :n (take n (map-indexed vector coll))
+            x xs))
+
+(defn fn-with-map-destructuring
+  [{:keys [hi] :samples/keys [bye]
+    {:keys [etc] {:as from} :to :as another-name} :another-key
+    qual-name :samples/my-name
+    :as ctx}]
+  [hi bye etc from another-name qual-name ctx])
+
+(defn fn-with-both-destructuring
+  [{:keys [a b] 
+    [bob steve {:keys [name] :as fred}] :coll
+    :as root}]
+  [a b bob steve name fred root])
