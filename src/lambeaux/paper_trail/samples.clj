@@ -21,3 +21,12 @@
 (defn simple-transform-with-nested-vector [num-seq]
   (apply concat [(filterv even? (map inc num-seq))
                  (filterv odd? (map inc num-seq))]))
+
+(defn simple-transform-as-map [num-seq]
+  {:first (first num-seq)
+   :rest (rest num-seq)})
+
+(defn simple-transform-with-nested-map [num-seq]
+  (update-keys {(keyword "a") (filterv even? num-seq)
+                (keyword "b") (filterv odd? num-seq)}
+               #(keyword (str (name %) "1"))))

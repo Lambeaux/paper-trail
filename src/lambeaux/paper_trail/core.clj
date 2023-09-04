@@ -52,15 +52,23 @@
 (defn ->impl [sym]
   @(resolve sym))
 
+(defn terminal? [obj]
+  (or (keyword? obj)
+      (number? obj)
+      (boolean? obj)
+      (nil? obj)
+      (char? obj)
+      (string? obj)))
+
 (defn handle-list
   [{:keys [reports] :as ctx} [verb & args :as in-form]]
   (add-log :handle-list in-form)
   (cond
-    ;; ---- special verbs ----
+    ;; ---- Special verbs ----
     (= verb 'defn) (handle-form ctx (last args))
-    ;; need to eval fn* because its not in clojure core
+    ;; Need to eval fn* because its not in clojure core
     (= verb 'fn*) (assoc ctx :value (eval (spy :fn* in-form)))
-    ;; ---- verb is known and invokable ----
+    ;; ---- Verb is known and invokable ----
     (accessible-macro? verb)
     (handle-list ctx (spy :expanded (macroexpand in-form)))
     (accessible-fn? verb)
@@ -75,7 +83,7 @@
       (add-log :result result)
       (swap! reports conj {:form form :result result})
       (spy :ctx (assoc ctx :value result)))
-    ;; ---- catch all ----
+    ;; ---- Catch all ----
     :else
     (throw (ex-info "Unknown handle-list case"
                     (assoc ctx :form in-form)))))
@@ -86,11 +94,19 @@
   (cond
     (list? form) (handle-list ctx form)
     (instance? clojure.lang.Cons form) (handle-list ctx form)
-    (vector? form) (assoc ctx :value (doall (->> form 
-                                                 (map (partial handle-form ctx))
-                                                 (mapv :value))))
+    (vector? form) (assoc ctx :value
+                          (into [] (comp (map (partial handle-form ctx))
+                                         (map :value))
+                                form))
+    (map? form) (assoc ctx :value
+                       (into {}
+                             (map (fn [[k v]]
+                                    [(:value (handle-form ctx k))
+                                     (:value (handle-form ctx v))]))
+                             form))
     (accessible-fn? form) (assoc ctx :value form)
     (symbol? form) (assoc ctx :value (spy :argmap (arg-map form)))
+    (terminal? form) (assoc ctx :value form)
     :else (throw (ex-info "Unknown handle-form case"
                           (assoc ctx :form form)))))
 
@@ -99,11 +115,15 @@
                  fn-name-or-var
                  (resolve fn-name-or-var))
         fn-meta (meta fn-var)
-        ;; TODO support all arglists, not just first
+        ;; ** TODO support all arglists, not just first
         fn-arglist (first (:arglists fn-meta))
         arg-map (into {} (map-indexed (fn [i v] [v (nth args i)])
                                       fn-arglist))
         fn-source (binding [*read-eval* false]
+                    ;; ** TODO improve support for #() inline functions
+                    ;; reading them causes them to become impls (untraceable)
+                    ;; ** Maybe pre-process the code str and sub out with 
+                    ;; (fn [] (...)) forms?
                     (read-string (repl/source-fn (symbol fn-var))))
         initial-ctx {:reports (atom [])
                      :fn-var fn-var
