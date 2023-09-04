@@ -51,3 +51,17 @@
   (-> (clojure.java.io/resource "sample-config.edn")
       (aero.core/read-config)
       (assoc :args (vec arglist))))
+
+(defn fn-with-variadics [& args]
+  ;; how would we handle (range) / infinite seqs?
+  (interleave (range 1 11) (partition 2 args)))
+
+(defn fn-with-overloads-and-variadics
+  ([a] (+ 1 a))
+  ([a b] (+ 1 a b))
+  ([a b & inputs] (apply + a b inputs)))
+
+(defn fn-with-overloads-and-variadics-not-in-order
+  ([a b] (+ 1 a b))
+  ([a] (+ 1 a))
+  ([a b & inputs] (apply + a b inputs)))
