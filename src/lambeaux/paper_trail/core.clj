@@ -38,9 +38,31 @@
 (defn core-fn? [obj]
   (contains? clojure-core-symbols->vars obj))
 
-(defn try-resolve [{:keys [current-ns] :as _ctx} obj]
+(defn to-namespace
+  "Attempts to convert an object to a namespace,
+   returning the namespace if successful, or nil
+   otherwise. Will convert symbols to namespaces."
+  [obj]
+  (try
+    (the-ns obj)
+    (catch Exception _e nil)))
+
+(defn try-resolve
+  "Attempts to resolve the provided object to a var.
+   Supports full qualifications using the full name
+   or an alias."
+  [{:keys [current-ns] :as _ctx} obj]
   (cond
-    (qualified-symbol? obj) (resolve obj)
+    (qualified-symbol? obj) (let [obj-ns (-> obj
+                                             namespace
+                                             symbol)]
+                              (if (to-namespace obj-ns)
+                                (resolve obj)
+                                (ns-resolve (-> current-ns
+                                                ns-aliases
+                                                (get obj-ns)
+                                                (to-namespace))
+                                            (symbol (name obj)))))
     (core-fn? obj) (resolve obj)
     :else (ns-resolve current-ns obj)))
 

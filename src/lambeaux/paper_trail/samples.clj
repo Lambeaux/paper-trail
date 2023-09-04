@@ -1,4 +1,6 @@
-(ns lambeaux.paper-trail.samples)
+(ns lambeaux.paper-trail.samples
+  (:require [clojure.java.io :as io]
+            [aero.core :as aero]))
 
 (defn simplest-even [num-seq]
   (filter even? (map inc num-seq)))
@@ -39,3 +41,13 @@
        :odds (simplest-odd num-seq)}
       (assoc :threading (simple-transform-with-threading num-seq))
       (assoc :transducers (simple-transform-with-transducers num-seq))))
+
+(defn third-party-library-aliased [arglist]
+  (-> (io/resource "sample-config.edn")
+      (aero/read-config)
+      (assoc :args (vec arglist))))
+
+(defn third-party-library-fully-qualified [arglist]
+  (-> (clojure.java.io/resource "sample-config.edn")
+      (aero.core/read-config)
+      (assoc :args (vec arglist))))
