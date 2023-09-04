@@ -11,11 +11,6 @@
 (defn trace-fn [])
 (defn report->log [])
 
-;; need a better way to determine if something is in
-;; clojure core proper, maybe by using the namespace?
-;; or generate a set of vars/symbols?
-(def core-fn? #{'map 'filter 'remove 'into})
-
 ;; ---------------------------------------------------------
 ;; Tracking
 ;; ---------------------------------------------------------
@@ -37,20 +32,32 @@
 
 (declare handle-form)
 
-(defn accessible-macro? [obj]
+(def clojure-core-symbols->vars
+  (ns-publics (the-ns 'clojure.core)))
+
+(defn core-fn? [obj]
+  (contains? clojure-core-symbols->vars obj))
+
+(defn try-resolve [{:keys [current-ns] :as _ctx} obj]
+  (cond
+    (qualified-symbol? obj) (resolve obj)
+    (core-fn? obj) (resolve obj)
+    :else (ns-resolve current-ns obj)))
+
+(defn accessible-macro? [ctx obj]
   (try
-    (when-let [resolved (resolve obj)]
+    (when-let [resolved (try-resolve ctx obj)]
       (boolean (:macro (meta resolved))))
     (catch Exception _e false)))
 
-(defn accessible-fn? [obj]
+(defn accessible-fn? [ctx obj]
   (try
-    (when-let [resolved (resolve obj)]
+    (when-let [resolved (try-resolve ctx obj)]
       (fn? @resolved))
     (catch Exception _e false)))
 
-(defn ->impl [sym]
-  @(resolve sym))
+(defn ->impl [ctx sym]
+  @(try-resolve ctx sym))
 
 (defn terminal? [obj]
   (or (keyword? obj)
@@ -69,15 +76,15 @@
     ;; Need to eval fn* because its not in clojure core
     (= verb 'fn*) (assoc ctx :value (eval (spy :fn* in-form)))
     ;; ---- Verb is known and invokable ----
-    (accessible-macro? verb)
+    (accessible-macro? ctx verb)
     (handle-list ctx (spy :expanded (macroexpand in-form)))
-    (accessible-fn? verb)
+    (accessible-fn? ctx verb)
     (let [form (doall (cons verb
                             (->> (spy :args args)
                                  (map (partial handle-form ctx))
                                  (map :value))))
-          result (apply (->impl verb)
-                        (map #(if (accessible-fn? %) (->impl %) %)
+          result (apply (->impl ctx verb)
+                        (map #(if (accessible-fn? ctx %) (->impl ctx %) %)
                              (rest form)))]
       (add-log :form form)
       (add-log :result result)
@@ -104,7 +111,7 @@
                                     [(:value (handle-form ctx k))
                                      (:value (handle-form ctx v))]))
                              form))
-    (accessible-fn? form) (assoc ctx :value form)
+    (accessible-fn? ctx form) (assoc ctx :value form)
     (symbol? form) (assoc ctx :value (spy :argmap (arg-map form)))
     (terminal? form) (assoc ctx :value form)
     :else (throw (ex-info "Unknown handle-form case"
@@ -126,6 +133,7 @@
                     ;; (fn [] (...)) forms?
                     (read-string (repl/source-fn (symbol fn-var))))
         initial-ctx {:reports (atom [])
+                     :current-ns (:ns fn-meta)
                      :fn-var fn-var
                      :fn-meta fn-meta
                      :fn-arglist fn-arglist
