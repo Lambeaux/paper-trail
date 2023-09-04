@@ -65,3 +65,10 @@
   ([a b] (+ 1 a b))
   ([a] (+ 1 a))
   ([a b & inputs] (apply + a b inputs)))
+
+(defn fn-with-map-destructuring
+  [{:keys [hi] :samples/keys [bye]
+    {:keys [etc] :as another-name} :another-key
+    qual-name :samples/my-name
+    :as ctx}]
+  [hi bye etc another-name qual-name ctx])

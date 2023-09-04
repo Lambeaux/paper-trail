@@ -28,10 +28,8 @@
   x)
 
 ;; ---------------------------------------------------------
-;; Descendent Recursive Interpreter
+;; Predicates / Resolvers
 ;; ---------------------------------------------------------
-
-(declare handle-form)
 
 (def clojure-core-symbols->vars
   (ns-publics (the-ns 'clojure.core)))
@@ -90,6 +88,12 @@
       (char? obj)
       (string? obj)))
 
+;; ---------------------------------------------------------
+;; Descendent Recursive Interpreter
+;; ---------------------------------------------------------
+
+(declare handle-form)
+
 (defn handle-defn
   [{::pt/keys [arglist] :as ctx} in-form]
   (let [[a b c :as forms] (reverse in-form)]
@@ -106,11 +110,11 @@
   (add-log :handle-list in-form)
   (try
     (cond
-    ;; ---- Special verbs ----
+      ;; ---- Special verbs ----
       (= verb 'defn) (handle-defn ctx in-form)
-    ;; Need to eval fn* because its not in clojure core
+      ;; Need to eval fn* because its not in clojure core
       (= verb 'fn*) (assoc ctx :value (eval (spy :fn* in-form)))
-    ;; ---- Verb is known and invokable ----
+      ;; ---- Verb is known and invokable ----
       (accessible-macro? ctx verb)
       (handle-list ctx (spy :expanded (macroexpand in-form)))
       (accessible-fn? ctx verb)
@@ -125,7 +129,7 @@
         (add-log :result result)
         (swap! reports conj {:form form :result result})
         (spy :ctx (assoc ctx :value result)))
-    ;; ---- Catch all ----
+      ;; ---- Catch all ----
       :else
       (throw (ex-info "Unknown handle-list case" (assoc ctx :err-form in-form))))
     (catch clojure.lang.ExceptionInfo ei (throw ei))
@@ -168,10 +172,54 @@
            ::pt/fn-var-meta fn-meta
            ::pt/fn-args args)))
 
+(declare handle-destructure)
+
+(defn map-destruct-fn [arg _argdef scope]
+  (fn [[k v]]
+    (cond
+      (= "keys" (name k)) (map #(vector % (get arg (keyword (namespace k) %))) v)
+      (= :as k) (list [k arg])
+      (or (map? k) (vector? k)) (handle-destructure (get arg v) k scope)
+      :else (list [k (get arg v)]))))
+
+(defn seq-destruct-fn [arg argdef scope]
+  (loop [i 0 scope* scope]
+    (cond
+      (nil? (nth argdef i)) scope*
+      (= :as (nth argdef i)) (recur (inc (inc i))
+                                    (assoc scope* (nth argdef (inc i)) (seq arg)))
+      (= '& (nth argdef i)) (recur (inc (inc i))
+                                   (assoc scope* (nth argdef (inc i)) (drop i arg)))
+      (or (map? (nth argdef i))
+          (vector? (nth argdef i))) (handle-destructure (nth arg i) (nth argdef i) scope*)
+      :else (recur (inc i)
+                   (assoc scope* (nth argdef i) (nth arg i)))))
+  ;; OLD CODE, remove:
+  (fn [i x]
+    (cond
+      (= :as x) (list [(get argdef (inc i)) arg])
+      (= '& x) (list [(get argdef (inc i)) ])
+      (or (map? x) (vector? x)) (handle-destructure (get arg i) x scope)
+      :else (list [x (get arg i)]))))
+
+(defn handle-destructure [arg argdef scope]
+  (cond
+    (map? argdef) (into scope 
+                        ;; need to concat lists of vectors
+                        (map (map-destruct-fn arg argdef scope)) 
+                        (seq argdef))
+    (vector? argdef) (into scope 
+                           ;; fix this call, not doing a map index anymore
+                           (map-indexed (seq-destruct-fn arg argdef scope)) 
+                           (seq argdef))
+    :else (throw (ex-info "Unrecognized destructure type" 
+                          (hash-map :arg arg :argdef argdef :scope scope)))))
+
 (defn setup-args
   [fn-args arglist fn-arg-map]
   (cond
     (= '& (first arglist)) (assoc fn-arg-map (second arglist) (seq fn-args))
+    ;; call destructure?
     (empty? arglist) fn-arg-map
     :else (recur (rest fn-args)
                  (rest arglist)
