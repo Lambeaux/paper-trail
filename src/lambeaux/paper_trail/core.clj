@@ -177,42 +177,35 @@
 (defn map-destruct-fn [arg _argdef scope]
   (fn [[k v]]
     (cond
-      (= "keys" (name k)) (map #(vector % (get arg (keyword (namespace k) %))) v)
-      (= :as k) (list [k arg])
       (or (map? k) (vector? k)) (handle-destructure (get arg v) k scope)
+      (= "keys" (name k)) (map #(vector % (get arg (keyword (namespace k) (name %)))) v)
+      (= :as k) (list [v arg])
       :else (list [k (get arg v)]))))
 
-(defn seq-destruct-fn [arg argdef scope]
+(defn seq-destruct [arg argdef scope]
   (loop [i 0 scope* scope]
+    (println "i = " i)
     (cond
-      (nil? (nth argdef i)) scope*
+      (or (>= i (count argdef))
+          (nil? (nth argdef i))) scope*
       (= :as (nth argdef i)) (recur (inc (inc i))
                                     (assoc scope* (nth argdef (inc i)) (seq arg)))
       (= '& (nth argdef i)) (recur (inc (inc i))
                                    (assoc scope* (nth argdef (inc i)) (drop i arg)))
       (or (map? (nth argdef i))
-          (vector? (nth argdef i))) (handle-destructure (nth arg i) (nth argdef i) scope*)
+          (vector? (nth argdef i))) (recur (inc i)
+                                           (handle-destructure
+                                            (nth arg i) (nth argdef i) scope*))
       :else (recur (inc i)
-                   (assoc scope* (nth argdef i) (nth arg i)))))
-  ;; OLD CODE, remove:
-  (fn [i x]
-    (cond
-      (= :as x) (list [(get argdef (inc i)) arg])
-      (= '& x) (list [(get argdef (inc i)) ])
-      (or (map? x) (vector? x)) (handle-destructure (get arg i) x scope)
-      :else (list [x (get arg i)]))))
+                   (assoc scope* (nth argdef i) (nth arg i))))))
 
 (defn handle-destructure [arg argdef scope]
   (cond
-    (map? argdef) (into scope 
-                        ;; need to concat lists of vectors
-                        (map (map-destruct-fn arg argdef scope)) 
-                        (seq argdef))
-    (vector? argdef) (into scope 
-                           ;; fix this call, not doing a map index anymore
-                           (map-indexed (seq-destruct-fn arg argdef scope)) 
-                           (seq argdef))
-    :else (throw (ex-info "Unrecognized destructure type" 
+    (map? argdef) (into scope  (->> (seq argdef)
+                                    (map (map-destruct-fn arg argdef scope))
+                                    (apply concat)))
+    (vector? argdef) (into scope (seq-destruct arg argdef scope))
+    :else (throw (ex-info "Unrecognized destructure type"
                           (hash-map :arg arg :argdef argdef :scope scope)))))
 
 (defn setup-args
