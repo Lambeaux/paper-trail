@@ -80,6 +80,9 @@
 (defn ->impl [ctx sym]
   @(try-resolve ctx sym))
 
+(defn map-impl-fn [ctx]
+  #(if (accessible-fn? ctx %) (->impl ctx %) %))
+
 (defn terminal? [obj]
   (or (keyword? obj)
       (number? obj)
@@ -123,7 +126,7 @@
                                    (map (partial handle-form ctx))
                                    (map :value))))
             result (apply (->impl ctx verb)
-                          (map #(if (accessible-fn? ctx %) (->impl ctx %) %)
+                          (map (map-impl-fn ctx)
                                (rest form)))]
         (add-log :form form)
         (add-log :result result)
