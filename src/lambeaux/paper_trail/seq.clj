@@ -15,6 +15,7 @@
         (boolean? x)           :type/boolean
         (char? x)              :type/char
         (class? x)             :type/class
+        (fn? x)                :type/fn
         (nil? x)               :type/nil
         (simple-keyword? x)    :type/keyword-simple
         (simple-symbol? x)     :type/symbol-simple
@@ -42,24 +43,37 @@
                                 :forms (cons result exprs)
                                 :args (drop exp-size args)))))))
 
-(def dispatch-pre {})
+(defn prepare-fn-literal
+  [{:keys [forms] [exp & exprs] :input :as ctx}]
+  (assoc ctx
+         :input (drop (dec (count (tree-seq seqable? seq exp))) exprs)
+         :forms (conj forms (eval exp))))
+
+(def dispatch-pre {'fn* prepare-fn-literal})
 (def dispatch-post {:type/list handle-list})
 
 (defn pre-process
   [ctx]
-  (loop [{:keys [forms] [exp & exprs] :input :as ctx*} ctx]
-    (cond
-      (nil? exp)
-      ctx*
-      :else
-      (recur (assoc ctx*
-                    :input exprs
-                    :forms (conj forms exp))))))
+  (loop [{:keys [dispatch-pre forms] [exp & exprs] :input :as ctx*} ctx]
+    (let [type-kw (classify exp)
+          handler (or (when (= type-kw :type/list) (dispatch-pre (first exp)))
+                      (dispatch-pre type-kw))]
+      (tap> ["Pre Process: " ctx*])
+      (cond
+        (nil? exp)
+        ctx*
+        (fn? handler)
+        (recur (handler ctx*))
+        :else
+        (recur (assoc ctx*
+                      :input exprs
+                      :forms (conj forms exp)))))))
 
 (defn post-process
   [ctx]
   (loop [{:keys [dispatch-post args scope] [exp & exprs] :forms :as ctx*} ctx]
     (let [handler (dispatch-post (classify exp))]
+      (tap> ["Post Process: " ctx*])
       (cond
         (nil? exp)
         nil
