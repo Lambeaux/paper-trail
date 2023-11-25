@@ -31,6 +31,15 @@
 
 (declare post-process)
 
+(defn handle-vector
+  [{:keys [args] [exp & exprs] :forms :as ctx}]
+  (let [exp-size (count exp)
+        result (into [] (take exp-size args))]
+    (lazy-seq
+     (post-process (assoc ctx
+                          :forms exprs
+                          :args (conj (drop exp-size args) result))))))
+
 (defn handle-list
   [{:keys [args] [exp & exprs] :forms :as ctx}]
   (let [exp-size (count exp)
@@ -50,7 +59,9 @@
          :forms (conj forms (eval exp))))
 
 (def dispatch-pre {'fn* prepare-fn-literal})
-(def dispatch-post {:type/list handle-list})
+
+(def dispatch-post {:type/list   handle-list
+                    :type/vector handle-vector})
 
 (defn pre-process
   [ctx]
@@ -63,6 +74,7 @@
         (nil? exp)
         ctx*
         (fn? handler)
+        ;; Possibly omit recur and just do a lazy-seq in handlers
         (recur (handler ctx*))
         :else
         (recur (assoc ctx*
