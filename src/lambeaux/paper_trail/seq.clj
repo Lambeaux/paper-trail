@@ -4,6 +4,10 @@
 
 (def temp-ctx {::pt/current-ns *ns*})
 
+(defn child-seq [x]
+  (let [has-children? #(if (string? %) false (seqable? %))]
+    (tree-seq has-children? seq x)))
+
 ;; - Use symbols to represent literals in a dispatch map ('let, 'try, etc)
 ;; - Use keywords to represent types in a dispatch map (:list, :vector, :map, etc)
 ;; - Use multi-methods to arrive at the key when preds are needed??
@@ -40,12 +44,24 @@
                           :forms exprs
                           :args (conj (drop exp-size args) result))))))
 
+(defn handle-map
+  [{:keys [args] [exp & exprs] :forms :as ctx}]
+  (let [exp-size (count exp)
+        result (into {} (take exp-size args))]
+    (lazy-seq
+     (post-process (assoc ctx
+                          :forms exprs
+                          :args (conj (drop exp-size args) result))))))
+
 (defn handle-list
   [{:keys [args] [exp & exprs] :forms :as ctx}]
   (let [exp-size (count exp)
         result (apply (core/->impl temp-ctx (first exp))
                       (map (core/map-impl-fn temp-ctx)
-                           (rest (take exp-size args))))]
+                           (rest (take exp-size args))))
+        result (if (instance? clojure.lang.IObj result)
+                 (with-meta result {::pt/is-evaled? true})
+                 result)]
     (cons {:form (take exp-size args) :result result}
           (lazy-seq
            (post-process (assoc ctx
@@ -55,13 +71,14 @@
 (defn prepare-fn-literal
   [{:keys [forms] [exp & exprs] :input :as ctx}]
   (assoc ctx
-         :input (drop (dec (count (tree-seq seqable? seq exp))) exprs)
+         :input (drop (dec (count (child-seq exp))) exprs)
          :forms (conj forms (eval exp))))
 
 (def dispatch-pre {'fn* prepare-fn-literal})
 
 (def dispatch-post {:type/list   handle-list
-                    :type/vector handle-vector})
+                    :type/vector handle-vector
+                    :type/map    handle-map})
 
 (defn pre-process
   [ctx]
@@ -84,11 +101,14 @@
 (defn post-process
   [ctx]
   (loop [{:keys [dispatch-post args scope] [exp & exprs] :forms :as ctx*} ctx]
-    (let [handler (dispatch-post (classify exp))]
+    (let [handler (dispatch-post (classify exp))
+          {::pt/keys [is-evaled?]} (meta exp)]
       (tap> ["Post Process: " ctx*])
       (cond
         (nil? exp)
         nil
+        is-evaled?
+        (recur (assoc ctx* :forms exprs :args (conj args exp)))
         (fn? handler)
         (handler ctx*)
         (and (symbol? exp)
@@ -105,7 +125,7 @@
   ([form scope]
    (trace-seq* {:dispatch-pre dispatch-pre
                 :dispatch-post dispatch-post
-                :input (tree-seq seqable? seq form)
+                :input (child-seq form)
                 :forms (list)
                 :args (list)
                 :scope scope})))
