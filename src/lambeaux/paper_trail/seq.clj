@@ -1,6 +1,7 @@
 (ns lambeaux.paper-trail.seq
   (:require [lambeaux.paper-trail.core :as core]
-            [paper.trail :as-alias pt]))
+            [paper.trail :as-alias pt])
+  (:import [clojure.lang Cons]))
 
 (def temp-ctx {::pt/current-ns *ns*})
 
@@ -28,7 +29,14 @@
         (map? x)               :type/map
         (vector? x)            :type/vector
         (set? x)               :type/set
-        (list? x)              :type/list
+        (list? x)              (let [op (first x)]
+                                 (cond (core/accessible-macro? temp-ctx op) :type/list-macro
+                                       (core/accessible-fn? temp-ctx op) :type/list-fn
+                                       :else :type/list-literal))
+        (instance? Cons x)     (let [op (first x)]
+                                 (cond (core/accessible-macro? temp-ctx op) :type/list-macro
+                                       (core/accessible-fn? temp-ctx op) :type/list-fn
+                                       :else :type/cons))
         (seq? x)               :type/seq
         :else (throw (ex-info (str "Type " (type x) " is unknown for value: " x)
                               {:value x :type (type x)}))))
@@ -37,6 +45,7 @@
 
 (defn handle-vector
   [{:keys [args] [exp & exprs] :forms :as ctx}]
+  (tap> ["Handle Vector" ctx])
   (let [exp-size (count exp)
         result (into [] (take exp-size args))]
     (lazy-seq
@@ -46,6 +55,7 @@
 
 (defn handle-map
   [{:keys [args] [exp & exprs] :forms :as ctx}]
+  (tap> ["Handle Map" ctx])
   (let [exp-size (count exp)
         result (into {} (take exp-size args))]
     (lazy-seq
@@ -53,8 +63,9 @@
                           :forms exprs
                           :args (conj (drop exp-size args) result))))))
 
-(defn handle-list
+(defn handle-list-fn
   [{:keys [args] [exp & exprs] :forms :as ctx}]
+  (tap> ["Handle List Fn" ctx])
   (let [exp-size (count exp)
         result (apply (core/->impl temp-ctx (first exp))
                       (map (core/map-impl-fn temp-ctx)
@@ -70,23 +81,34 @@
 
 (defn prepare-fn-literal
   [{:keys [forms] [exp & exprs] :input :as ctx}]
+  (tap> ["Prepare Fn Literal" ctx])
   (assoc ctx
          :input (drop (dec (count (child-seq exp))) exprs)
          :forms (conj forms (eval exp))))
 
-(def dispatch-pre {'fn* prepare-fn-literal})
+(defn prepare-macro
+  [{:keys [forms] [exp & _exprs] :input :as ctx}]
+  (tap> ["Prepare Macro" ctx])
+  ;; Reminder: Calling macroexpand converts all lists to be Cons (nested)
+  (let [expanded (macroexpand exp)]
+    (assoc ctx
+           :input (child-seq expanded)
+           :forms forms)))
 
-(def dispatch-post {:type/list   handle-list
-                    :type/vector handle-vector
-                    :type/map    handle-map})
+(def dispatch-pre {'fn*             prepare-fn-literal
+                   :type/list-macro prepare-macro})
+
+(def dispatch-post {:type/list-fn   handle-list-fn
+                    :type/vector    handle-vector
+                    :type/map       handle-map})
 
 (defn pre-process
   [ctx]
   (loop [{:keys [dispatch-pre forms] [exp & exprs] :input :as ctx*} ctx]
     (let [type-kw (classify exp)
-          handler (or (when (= type-kw :type/list) (dispatch-pre (first exp)))
+          handler (or (when (list? exp) (dispatch-pre (first exp)))
                       (dispatch-pre type-kw))]
-      (tap> ["Pre Process: " ctx*])
+      (tap> ["Pre Process" type-kw handler ctx*])
       (cond
         (nil? exp)
         ctx*
@@ -101,9 +123,11 @@
 (defn post-process
   [ctx]
   (loop [{:keys [dispatch-post args scope] [exp & exprs] :forms :as ctx*} ctx]
-    (let [handler (dispatch-post (classify exp))
+    (let [type-kw (classify exp)
+          handler (or (when (list? exp) (dispatch-post (first exp)))
+                      (dispatch-post type-kw))
           {::pt/keys [is-evaled?]} (meta exp)]
-      (tap> ["Post Process: " ctx*])
+      (tap> ["Post Process" type-kw handler ctx*])
       (cond
         (nil? exp)
         nil
