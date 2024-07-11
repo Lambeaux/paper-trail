@@ -1,6 +1,15 @@
 {:paths ["src" "resources"]
- :deps {org.clojure/clojure {:mvn/version "1.11.1"}
-        aero/aero {:mvn/version "1.1.6"}}
- :aliases {:cider-clj {:extra-deps {org.clojure/clojure {:mvn/version "1.11.1"}
+ :deps {org.clojure/clojure {:mvn/version "1.11.1"}}
+ :aliases {:test {:extra-paths ["test"]
+                  :extra-deps {aero/aero
+                               {:mvn/version "1.1.6"}
+                               io.github.cognitect-labs/test-runner
+                               {:git/sha "7284cda41fb9edc0f3bc6b6185cfb7138fc8a023"}}
+                  :main-opts ["-m" "cognitect.test-runner"]
+                  :exec-fn cognitect.test-runner.api/test}
+           :cider-clj {:extra-deps {aero/aero {:mvn/version "1.1.6"}
                                     cider/cider-nrepl {:mvn/version "0.37.0"}}
-                       :main-opts ["-m" "nrepl.cmdline" "--middleware" "[cider.nrepl/cider-middleware]"]}}}
+                       :main-opts ["-m"
+                                   "nrepl.cmdline"
+                                   "--middleware"
+                                   "[cider.nrepl/cider-middleware]"]}}}

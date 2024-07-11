@@ -1,7 +1,7 @@
 (ns lambeaux.paper-trail.seq
   (:require [lambeaux.paper-trail.core :as core]
             [paper.trail :as-alias pt])
-  (:import [clojure.lang Cons]))
+  (:import [clojure.lang IObj Cons]))
 
 (def temp-ctx {::pt/current-ns *ns*})
 
@@ -70,21 +70,34 @@
         result (apply (core/->impl temp-ctx (first exp))
                       (map (core/map-impl-fn temp-ctx)
                            (rest (take exp-size args))))
-        result (if (instance? clojure.lang.IObj result)
+        result (if (instance? IObj result)
                  (with-meta result {::pt/is-evaled? true})
                  result)]
-    (cons {:form (take exp-size args) :result result}
+    (cons {:form (map (fn [arg]
+                        (or (and (instance? IObj arg)
+                                 (::pt/raw-form (meta arg)))
+                            arg))
+                      (take exp-size args))
+           :result result}
           (lazy-seq
            (post-process (assoc ctx
                                 :forms (cons result exprs)
                                 :args (drop exp-size args)))))))
+
+(defn handle-fn-literal
+  [{:keys [args] [exp & exprs] :forms :as ctx}]
+  (lazy-seq
+   (post-process
+    (assoc ctx
+           :forms exprs
+           :args (conj args (with-meta (eval exp) {::pt/raw-form exp}))))))
 
 (defn prepare-fn-literal
   [{:keys [forms] [exp & exprs] :input :as ctx}]
   (tap> ["Prepare Fn Literal" ctx])
   (assoc ctx
          :input (drop (dec (count (child-seq exp))) exprs)
-         :forms (conj forms (eval exp))))
+         :forms (conj forms exp)))
 
 (defn prepare-macro
   [{:keys [forms] [exp & _exprs] :input :as ctx}]
@@ -95,10 +108,13 @@
            :input (child-seq expanded)
            :forms forms)))
 
-(def dispatch-pre {'fn*             prepare-fn-literal
+(def dispatch-pre {'fn              prepare-fn-literal
+                   'fn*             prepare-fn-literal
                    :type/list-macro prepare-macro})
 
-(def dispatch-post {:type/list-fn   handle-list-fn
+(def dispatch-post {'fn             handle-fn-literal
+                    'fn*            handle-fn-literal
+                    :type/list-fn   handle-list-fn
                     :type/vector    handle-vector
                     :type/map       handle-map})
 
