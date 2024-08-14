@@ -27,36 +27,27 @@
 
 (defn handle-invoke
   [{:keys [form->commands in-macro-impl?] :as attrs} form]
-  (println "handle-invoke: " form)
   (let [args (rest form)
         cmds (mapcat (partial form->commands attrs) (reverse args))]
-    (concat (when-not in-macro-impl?
-              [{:cmd :begin-form :type :fn :op (first form)}])
+    (concat [{:cmd :begin-form :type :fn :op (first form) :impl? in-macro-impl?}]
             cmds
-            [{:cmd :invoke-fn
-              :op (first form)
-              :arg-count (count args)}]
-            (when-not in-macro-impl?
-              [{:cmd :end-form :type :fn :op (first form)}]))))
+            [{:cmd :invoke-fn :op (first form) :arg-count (count args)}
+             {:cmd :end-form :type :fn :op (first form) :impl? in-macro-impl?}])))
 
 (defn handle-do
   [{:keys [form->commands in-macro-impl?] :as attrs} form]
   (let [form->commands (partial form->commands attrs)]
-    (concat (when-not in-macro-impl?
-              [{:cmd :begin-form :type :special :op 'do}])
-            (apply concat (map form->commands (rest form)))
-            (when-not in-macro-impl?
-              [{:cmd :end-form :type :special :op 'do}]))))
+    (concat [{:cmd :begin-form :type :special :op 'do :impl? in-macro-impl?}]
+            (mapcat form->commands (rest form))
+            [{:cmd :end-form :type :special :op 'do :impl? in-macro-impl?}])))
 
 (defn handle-if
   [{:keys [form->commands in-macro-impl?] :as attrs} form]
-  (println "handle-if: " form)
   (let [id (gensym "if-")
         form->commands (partial form->commands attrs)
         cond-pos (form->commands (first (drop 2 form)))
         cond-neg (form->commands (second (drop 2 form)))]
-    (concat (when-not in-macro-impl?
-              [{:cmd :begin-form :type :special :op 'if}])
+    (concat [{:cmd :begin-form :type :special :op 'if :impl? in-macro-impl?}]
             (form->commands (second form))
             [{:cmd :capture-state :id id}
              {:cmd :exec-when :id id :count (count cond-pos)}]
@@ -64,23 +55,35 @@
             (when cond-neg
               [{:cmd :skip-when :id id :count (count cond-neg)}])
             cond-neg
-            (when-not in-macro-impl?
-              [{:cmd :end-form :type :special :op 'if}]))))
+            [{:cmd :end-form :type :special :op 'if :impl? in-macro-impl?}])))
+
+(defn handle-let
+  [{:keys [form->commands in-macro-impl?] :as attrs} form]
+  (let [form->commands (partial form->commands attrs)
+        bindings (partition 2 (second form))
+        body (drop 2 form)]
+    (concat [{:cmd :begin-form :type :special :op (first form) :impl? in-macro-impl?}]
+            (mapcat (fn [[bname bform]] 
+                      (concat (form->commands bform)
+                              [{:cmd :bind-name :id bname :impl? in-macro-impl?}])) 
+                    bindings)
+            (mapcat form->commands body)
+            [{:cmd :end-form :type :special :op (first form) :impl? in-macro-impl?}])))
 
 (defn handle-macro
   [{:keys [form->commands in-macro-impl?] :as attrs} form]
   (let [form* (cons (first form)
                     (map #(vary-meta % assoc ::pt/macro-arg true)
                          (rest form)))]
-    (concat (when-not in-macro-impl?
-              [{:cmd :begin-form :type :macro :op (first form)}])
+    (concat [{:cmd :begin-form :type :macro :op (first form) :impl? in-macro-impl?}]
             (form->commands (assoc attrs :in-macro-impl? true)
                             (macroexpand form*))
-            (when-not in-macro-impl?
-              [{:cmd :end-form :type :macro :op (first form)}]))))
+            [{:cmd :end-form :type :macro :op (first form) :impl? in-macro-impl?}])))
 
 (def form-handlers {'do              (wrap-check-macro handle-do)
                     'if              (wrap-check-macro handle-if)
+                    'let             (wrap-check-macro handle-let)
+                    'let*            (wrap-check-macro handle-let)
                     :type/list-fn    (wrap-check-macro handle-invoke)
                     :type/list-macro (wrap-check-macro handle-macro)})
 
@@ -88,13 +91,11 @@
   ([form]
    (form->commands {:form->commands form->commands :in-macro-impl? false} form))
   ([attrs form]
-   (println "form->commands: " form)
    (when form
      (if-not (coll? form)
        (seq [{:cmd :scalar :form form}])
        (let [h (or (get form-handlers (first form))
                    (get form-handlers (pts/classify form)))]
-         (println "  h = " h)
          (if h
            (lazy-seq (h attrs form))
            (seq [{:cmd :not-implemented :form form}])))))))
@@ -121,15 +122,31 @@
                                     (::pt/raw-form (meta arg)))
                                arg))
                          (take arg-count args))]
-    (assoc ctx :commands cmds :args (conj (drop arg-count args) result))))
+    (assoc ctx :commands cmds :args (conj (into (list) (drop arg-count args)) result))))
 
 (defn process-scalar
-  [{:keys [args] [cmd & cmds] :commands :as ctx}]
-  (assoc ctx :commands cmds :args (conj args (:form cmd))))
+  [{:keys [args source-scope impl-scope] [cmd & cmds] :commands :as ctx}]
+  (let [scalar-form (:form cmd)
+        scalar-value (or (peek (get source-scope scalar-form))
+                         (peek (get impl-scope scalar-form))
+                         scalar-form)]
+    (assoc ctx :commands cmds :args (conj args scalar-value))))
 
 (defn process-capture-state
   [{:keys [args state] [cmd & cmds] :commands :as ctx}]
   (assoc ctx :commands cmds :state (assoc state (:id cmd) (peek args))))
+
+(defn process-bind-name
+  [{:keys [args source-scope impl-scope] [{:keys [id impl?]} & cmds] :commands :as ctx}]
+  (if impl?
+    (assoc ctx :commands cmds :impl-scope (update impl-scope id #(conj % (peek args))))
+    (assoc ctx :commands cmds :source-scope (update source-scope id #(conj % (peek args))))))
+
+(defn process-unbind-name
+  [{:keys [source-scope impl-scope] [{:keys [id impl?]} & cmds] :commands :as ctx}]
+  (if impl?
+    (assoc ctx :commands cmds :impl-scope (update impl-scope id pop))
+    (assoc ctx :commands cmds :source-scope (update source-scope id pop))))
 
 (defn process-exec-when
   [{:keys [state] [cmd & cmds] :commands :as ctx}]
@@ -148,12 +165,18 @@
                        :invoke-fn process-invoke
                        :scalar process-scalar
                        :capture-state process-capture-state
+                       :bind-name process-bind-name
+                       :unbind-name process-unbind-name
                        :exec-when process-exec-when
                        :skip-when process-skip-when
                        :not-implemented process-scalar})
 
 (defn execute [commands]
-  (loop [{:keys [commands args] :as ctx} {:commands commands :args (list) :scope {} :state {}}]
+  (loop [{:keys [commands args] :as ctx} {:commands commands 
+                                          :args (list) 
+                                          :source-scope {}
+                                          :impl-scope {}
+                                          :state {}}]
     (let [h (get command-handlers (:cmd (first commands)))]
       (if h
         (recur (h ctx))
