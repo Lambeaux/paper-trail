@@ -4,7 +4,7 @@
             [paper.trail :as-alias pt])
   (:import [clojure.lang IObj Cons]))
 
-(defn decompose-form 
+(defn decompose-form
   [form]
   (cond (vector? form)
         {:event :vector :children (map decompose-form form)}
@@ -184,28 +184,32 @@
    :skip-when process-skip-when
    :not-implemented process-scalar})
 
+(defn new-ctx
+  [commands]
+  {:commands commands
+   :args (list)
+   :source-scope {}
+   :impl-scope {}
+   :state {}})
+
 (defn execute
   [commands]
-  (loop [{:keys [commands args] :as ctx} {:commands commands
-                                          :args (list)
-                                          :source-scope {}
-                                          :impl-scope {}
-                                          :state {}}]
+  (loop [{:keys [commands args] :as ctx} (new-ctx commands)]
     (let [h (get command-handlers (:cmd (first commands)))]
       (if h
         (recur (h ctx))
         (first args)))))
 
-(defn execute*
+(defn ctx-seq
   [input]
-  (if (seq? input)
-    (execute* {:commands input
-               :args (list)
-               :source-scope {}
-               :impl-scope {}
-               :state {}})
+  (cond
+    (seq? input)
+    (ctx-seq (new-ctx input))
+    (map? input)
     (cons input (lazy-seq
                  (let [h (get command-handlers
                               (:cmd (first (:commands input))))]
                    (when h
-                     (execute* (h input))))))))
+                     (ctx-seq (h input))))))
+    :else
+    (throw (IllegalArgumentException. "Input must be seq or map"))))
