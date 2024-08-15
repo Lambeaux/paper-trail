@@ -4,7 +4,8 @@
             [paper.trail :as-alias pt])
   (:import [clojure.lang IObj Cons]))
 
-(defn decompose-form [form]
+(defn decompose-form 
+  [form]
   (cond (vector? form)
         {:event :vector :children (map decompose-form form)}
         (sequential? form)
@@ -63,9 +64,9 @@
         bindings (partition 2 (second form))
         body (drop 2 form)]
     (concat [{:cmd :begin-form :type :special :op (first form) :impl? in-macro-impl?}]
-            (mapcat (fn [[bname bform]] 
+            (mapcat (fn [[bname bform]]
                       (concat (form->commands bform)
-                              [{:cmd :bind-name :id bname :impl? in-macro-impl?}])) 
+                              [{:cmd :bind-name :id bname :impl? in-macro-impl?}]))
                     bindings)
             (mapcat form->commands body)
             [{:cmd :end-form :type :special :op (first form) :impl? in-macro-impl?}])))
@@ -73,32 +74,34 @@
 (defn handle-macro
   [{:keys [form->commands in-macro-impl?] :as attrs} form]
   (let [form* (cons (first form)
-                    (map #(vary-meta % assoc ::pt/macro-arg true)
+                    (map #(if (instance? IObj %)
+                            (vary-meta % assoc ::pt/macro-arg true)
+                            %)
                          (rest form)))]
     (concat [{:cmd :begin-form :type :macro :op (first form) :impl? in-macro-impl?}]
             (form->commands (assoc attrs :in-macro-impl? true)
                             (macroexpand form*))
             [{:cmd :end-form :type :macro :op (first form) :impl? in-macro-impl?}])))
 
-(def form-handlers {'do              (wrap-check-macro handle-do)
-                    'if              (wrap-check-macro handle-if)
-                    'let             (wrap-check-macro handle-let)
-                    'let*            (wrap-check-macro handle-let)
-                    :type/list-fn    (wrap-check-macro handle-invoke)
-                    :type/list-macro (wrap-check-macro handle-macro)})
+(def form-handlers
+  {'do              (wrap-check-macro handle-do)
+   'if              (wrap-check-macro handle-if)
+   'let             (wrap-check-macro handle-let)
+   'let*            (wrap-check-macro handle-let)
+   :type/list-fn    (wrap-check-macro handle-invoke)
+   :type/list-macro (wrap-check-macro handle-macro)})
 
 (defn form->commands
   ([form]
    (form->commands {:form->commands form->commands :in-macro-impl? false} form))
   ([attrs form]
-   (when form
-     (if-not (coll? form)
-       (seq [{:cmd :scalar :form form}])
-       (let [h (or (get form-handlers (first form))
-                   (get form-handlers (pts/classify form)))]
-         (if h
-           (lazy-seq (h attrs form))
-           (seq [{:cmd :not-implemented :form form}])))))))
+   (if-not (coll? form)
+     (seq [{:cmd :scalar :form form}])
+     (let [h (or (get form-handlers (first form))
+                 (get form-handlers (pts/classify form)))]
+       (if h
+         (lazy-seq (h attrs form))
+         (seq [{:cmd :not-implemented :form form}]))))))
 
 ;; ----------------------------------------------------------------------------------------
 
@@ -129,7 +132,11 @@
   (let [scalar-form (:form cmd)
         scalar-value (or (peek (get source-scope scalar-form))
                          (peek (get impl-scope scalar-form))
-                         scalar-form)]
+                         scalar-form)
+        scalar-value (case scalar-value
+                       ::pt/nil nil
+                       ::pt/false false
+                       scalar-value)]
     (assoc ctx :commands cmds :args (conj args scalar-value))))
 
 (defn process-capture-state
@@ -138,9 +145,14 @@
 
 (defn process-bind-name
   [{:keys [args source-scope impl-scope] [{:keys [id impl?]} & cmds] :commands :as ctx}]
-  (if impl?
-    (assoc ctx :commands cmds :impl-scope (update impl-scope id #(conj % (peek args))))
-    (assoc ctx :commands cmds :source-scope (update source-scope id #(conj % (peek args))))))
+  (let [val-to-bind (peek args)
+        val-to-bind (case val-to-bind
+                      nil ::pt/nil
+                      false ::pt/false
+                      val-to-bind)]
+    (if impl?
+      (assoc ctx :commands cmds :impl-scope (update impl-scope id #(conj % val-to-bind)))
+      (assoc ctx :commands cmds :source-scope (update source-scope id #(conj % val-to-bind))))))
 
 (defn process-unbind-name
   [{:keys [source-scope impl-scope] [{:keys [id impl?]} & cmds] :commands :as ctx}]
@@ -160,20 +172,22 @@
     (assoc ctx :commands (drop (:count cmd) cmds))
     (assoc ctx :commands cmds)))
 
-(def command-handlers {:begin-form process-no-op
-                       :end-form process-no-op
-                       :invoke-fn process-invoke
-                       :scalar process-scalar
-                       :capture-state process-capture-state
-                       :bind-name process-bind-name
-                       :unbind-name process-unbind-name
-                       :exec-when process-exec-when
-                       :skip-when process-skip-when
-                       :not-implemented process-scalar})
+(def command-handlers
+  {:begin-form process-no-op
+   :end-form process-no-op
+   :invoke-fn process-invoke
+   :scalar process-scalar
+   :capture-state process-capture-state
+   :bind-name process-bind-name
+   :unbind-name process-unbind-name
+   :exec-when process-exec-when
+   :skip-when process-skip-when
+   :not-implemented process-scalar})
 
-(defn execute [commands]
-  (loop [{:keys [commands args] :as ctx} {:commands commands 
-                                          :args (list) 
+(defn execute
+  [commands]
+  (loop [{:keys [commands args] :as ctx} {:commands commands
+                                          :args (list)
                                           :source-scope {}
                                           :impl-scope {}
                                           :state {}}]
@@ -181,3 +195,17 @@
       (if h
         (recur (h ctx))
         (first args)))))
+
+(defn execute*
+  [input]
+  (if (seq? input)
+    (execute* {:commands input
+               :args (list)
+               :source-scope {}
+               :impl-scope {}
+               :state {}})
+    (cons input (lazy-seq
+                 (let [h (get command-handlers
+                              (:cmd (first (:commands input))))]
+                   (when h
+                     (execute* (h input))))))))
