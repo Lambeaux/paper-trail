@@ -83,8 +83,64 @@
                             (macroexpand form*))
             [{:cmd :end-form :type :macro :op (first form) :impl? in-macro-impl?}])))
 
+(defn fndef->bodies
+  [form]
+  (let [nil-body (list 'do nil)
+        parse-body (fn [sig]
+                     (when-not (vector? (first sig))
+                       (throw (IllegalArgumentException.
+                               "Invalid fn sig: " (str sig))))
+                     (hash-map
+                      :arity (count (first sig))
+                      :argdefs (first sig)
+                      :body (if (= 1 (count sig))
+                              nil-body
+                              (cons 'do
+                                    (map #(if (nil? %) nil-body %)
+                                         (if (and (map? (second sig))
+                                                  (> (count sig) 2))
+                                           (drop 2 sig)
+                                           (drop 1 sig)))))))
+        params (rest form)
+        params (if (symbol? (first params))
+                 (rest params)
+                 params)]
+    (if (vector? (first params))
+      {(count (first params)) (parse-body params)}
+      (into {} (map (fn [sig]
+                      [(count (first sig)) (parse-body sig)])
+                    params)))))
+
+(defn handle-def
+  [{:keys [form->commands in-macro-impl? enable-cmd-gen? args] :as attrs} form]
+  (if enable-cmd-gen?
+    (concat [{:cmd :begin-form :type :special :op 'def :impl? in-macro-impl?}]
+            (when (> (count form) 2)
+              (form->commands attrs (last form)))
+            [{:cmd :intern-var
+              :id (second form)
+              :has-root-binding? (> (count form) 2)
+              :impl? in-macro-impl?}
+             {:cmd :end-form :type :special :op 'def :impl? in-macro-impl?}])
+    (if-not (and (> (count form) 2)
+                 (or (= 'fn (first (last form)))
+                     (= 'fn* (first (last form)))))
+      (throw (IllegalArgumentException. "Provided var is not a fn: " (str form)))
+      (let [{:keys [argdefs body]} (get (fndef->bodies (last form)) (count args))]
+        (concat (map (fn [argdef arg]
+                       {:cmd :bind-name
+                        :id argdef
+                        :value arg
+                        :has-val? true
+                        :impl? in-macro-impl?})
+                     argdefs
+                     args)
+                [{:cmd :recur-target :impl? in-macro-impl?}]
+                (form->commands (assoc attrs :enable-cmd-gen? true) body))))))
+
 (def form-handlers
-  {'do              (wrap-check-macro handle-do)
+  {'def             (wrap-check-macro handle-def)
+   'do              (wrap-check-macro handle-do)
    'if              (wrap-check-macro handle-if)
    'let             (wrap-check-macro handle-let)
    'let*            (wrap-check-macro handle-let)
@@ -92,16 +148,28 @@
    :type/list-macro (wrap-check-macro handle-macro)})
 
 (defn form->commands
+  [attrs form]
+  (if-not (coll? form)
+    (seq [{:cmd :scalar :form form}])
+    (let [h (or (get form-handlers (first form))
+                (get form-handlers (pts/classify form)))]
+      (if h
+        (lazy-seq (h attrs form))
+        (seq [{:cmd :not-implemented :form form}])))))
+
+(defn create-commands
   ([form]
-   (form->commands {:form->commands form->commands :in-macro-impl? false} form))
-  ([attrs form]
-   (if-not (coll? form)
-     (seq [{:cmd :scalar :form form}])
-     (let [h (or (get form-handlers (first form))
-                 (get form-handlers (pts/classify form)))]
-       (if h
-         (lazy-seq (h attrs form))
-         (seq [{:cmd :not-implemented :form form}]))))))
+   (form->commands {:form->commands form->commands
+                    :in-macro-impl? false
+                    :enable-cmd-gen? true}
+                   form))
+  ([form args]
+   (assert (vector? args) "args must be a vector")
+   (form->commands {:form->commands form->commands
+                    :in-macro-impl? false
+                    :enable-cmd-gen? false
+                    :args args}
+                   form)))
 
 ;; ----------------------------------------------------------------------------------------
 
@@ -190,6 +258,8 @@
    :unbind-name process-unbind-name
    :exec-when process-exec-when
    :skip-when process-skip-when
+   :intern-var process-no-op ;; fix
+   :recur-target process-no-op ;; fix
    :not-implemented process-scalar})
 
 (defn new-ctx
