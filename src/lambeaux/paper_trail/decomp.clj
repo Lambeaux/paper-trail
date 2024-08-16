@@ -112,11 +112,11 @@
   (assoc ctx :commands cmds))
 
 (defn process-invoke
-  [{:keys [args] [cmd & cmds] :commands :as ctx}]
+  [{:keys [call-stack] [cmd & cmds] :commands :as ctx}]
   (let [arg-count (:arg-count cmd)
         result (apply (core/->impl temp-ctx (:op cmd))
                       (map (core/map-impl-fn temp-ctx)
-                           (take arg-count args)))
+                           (take arg-count call-stack)))
         result (if (instance? IObj result)
                  (with-meta result {::pt/is-evaled? true})
                  result)
@@ -124,11 +124,13 @@
                            (or (and (instance? IObj arg)
                                     (::pt/raw-form (meta arg)))
                                arg))
-                         (take arg-count args))]
-    (assoc ctx :commands cmds :args (conj (into (list) (drop arg-count args)) result))))
+                         (take arg-count call-stack))]
+    (assoc ctx
+           :commands cmds
+           :call-stack (conj (into (list) (drop arg-count call-stack)) result))))
 
 (defn process-scalar
-  [{:keys [args source-scope impl-scope] [cmd & cmds] :commands :as ctx}]
+  [{:keys [call-stack source-scope impl-scope] [cmd & cmds] :commands :as ctx}]
   (let [scalar-form (:form cmd)
         scalar-value (or (peek (get source-scope scalar-form))
                          (peek (get impl-scope scalar-form))
@@ -137,15 +139,21 @@
                        ::pt/nil nil
                        ::pt/false false
                        scalar-value)]
-    (assoc ctx :commands cmds :args (conj args scalar-value))))
+    (assoc ctx
+           :commands cmds
+           :call-stack (conj call-stack scalar-value))))
 
 (defn process-capture-state
-  [{:keys [args state] [cmd & cmds] :commands :as ctx}]
-  (assoc ctx :commands cmds :state (assoc state (:id cmd) (peek args))))
+  [{:keys [call-stack state] [cmd & cmds] :commands :as ctx}]
+  (assoc ctx :commands cmds :state (assoc state (:id cmd) (peek call-stack))))
 
 (defn process-bind-name
-  [{:keys [args source-scope impl-scope] [{:keys [id impl?]} & cmds] :commands :as ctx}]
-  (let [val-to-bind (peek args)
+  [{:keys [call-stack source-scope impl-scope]
+    [{:keys [id value has-val? impl?]} & cmds] :commands
+    :as ctx}]
+  (let [val-to-bind (if has-val?
+                      value
+                      (peek call-stack))
         val-to-bind (case val-to-bind
                       nil ::pt/nil
                       false ::pt/false
@@ -187,18 +195,18 @@
 (defn new-ctx
   [commands]
   {:commands commands
-   :args (list)
+   :call-stack (list)
    :source-scope {}
    :impl-scope {}
    :state {}})
 
 (defn execute
   [commands]
-  (loop [{:keys [commands args] :as ctx} (new-ctx commands)]
+  (loop [{:keys [commands call-stack] :as ctx} (new-ctx commands)]
     (let [h (get command-handlers (:cmd (first commands)))]
       (if h
         (recur (h ctx))
-        (first args)))))
+        (first call-stack)))))
 
 (defn ctx-seq
   [input]
