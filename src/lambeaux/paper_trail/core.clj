@@ -72,13 +72,16 @@
     (catch Exception _e false)))
 
 (defn accessible-fn? [ctx obj]
-  (try
-    (when-let [resolved (try-resolve ctx obj)]
-      (fn? @resolved))
-    (catch Exception _e false)))
+  (or (keyword? obj)
+      (try
+        (when-let [resolved (try-resolve ctx obj)]
+          (fn? @resolved))
+        (catch Exception _e false))))
 
 (defn ->impl [ctx sym]
-  @(try-resolve ctx sym))
+  (if (keyword? sym) 
+    sym 
+    @(try-resolve ctx sym)))
 
 (defn map-impl-fn [ctx]
   #(if (accessible-fn? ctx %) (->impl ctx %) %))

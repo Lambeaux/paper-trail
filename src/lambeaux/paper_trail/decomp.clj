@@ -89,7 +89,7 @@
         parse-body (fn [sig]
                      (when-not (vector? (first sig))
                        (throw (IllegalArgumentException.
-                               "Invalid fn sig: " (str sig))))
+                               (str "Invalid fn sig: " sig))))
                      (hash-map
                       :arity (count (first sig))
                       :argdefs (first sig)
@@ -124,8 +124,9 @@
              {:cmd :end-form :type :special :op 'def :impl? in-macro-impl?}])
     (if-not (and (> (count form) 2)
                  (or (= 'fn (first (last form)))
-                     (= 'fn* (first (last form)))))
-      (throw (IllegalArgumentException. "Provided var is not a fn: " (str form)))
+                     (= 'fn* (first (last form)))
+                     (= 'clojure.core/fn (first (last form)))))
+      (throw (IllegalArgumentException. (str "Provided var is not a fn: " form)))
       (let [{:keys [argdefs body]} (get (fndef->bodies (last form)) (count args))]
         (concat (map (fn [argdef arg]
                        {:cmd :bind-name
