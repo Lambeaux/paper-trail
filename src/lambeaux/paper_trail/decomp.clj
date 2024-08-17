@@ -140,10 +140,10 @@
                         :bind-id argdef
                         :bind-from :command-value
                         :value arg
-                        :impl? in-macro-impl?})
+                        :impl? false})
                      argdefs
                      args)
-                [{:cmd :recur-target :idx recur-idx :impl? in-macro-impl?}]
+                [{:cmd :recur-target :idx recur-idx :impl? false}]
                 (form->commands
                  (assoc attrs :enable-cmd-gen? true :argdef-stack (conj argdef-stack argdefs))
                  body))))))
@@ -239,7 +239,10 @@
     (-> ctx
         next-command
         (assoc :call-stack
-               (conj (into (list) (drop arg-count call-stack)) result)))))
+               (conj (->> (drop arg-count call-stack)
+                          (reverse)
+                          (into (list)))
+                     result)))))
 
 (defn process-scalar
   [{:keys [call-stack source-scope impl-scope] [cmd & _] :commands :as ctx}]
@@ -316,7 +319,7 @@
                                                (= idx (:idx old-cmd)))))
                                    command-history)]
     (assoc ctx
-           :commands (concat cmds-to-replay [cmd] cmds)
+           :commands (concat (reverse cmds-to-replay) [cmd] cmds)
            :command-history (drop (count cmds-to-replay) command-history))))
 
 (def command-handlers
@@ -364,3 +367,38 @@
                      (ctx-seq (h input))))))
     :else
     (throw (IllegalArgumentException. "Input must be seq or map"))))
+
+;; ----------------------------------------------------------------------------------------
+
+(defn run-eval
+  ([form]
+   (run-eval form nil))
+  ([form args]
+   (let [cmds (if args
+                (create-commands form args)
+                (create-commands form))]
+     (execute cmds))))
+
+(defn run-debug-report
+  ([form]
+   (run-debug-report form nil))
+  ([form args]
+   (run-debug-report form args identity))
+  ([form args xform]
+   (let [cmds (if args
+                (create-commands form args)
+                (create-commands form))]
+     (->> cmds
+          (ctx-seq)
+          (map (fn [{:keys [commands] :as ctx}]
+                 (-> ctx
+                     (assoc :next-command (first commands))
+                     (dissoc :command-history :commands))))
+          (map (fn [ctx]
+                 (update-vals ctx #(if-not (instance? IObj %)
+                                     %
+                                     (with-meta % {:portal.viewer/default
+                                                   :portal.viewer/pprint})))))
+          (xform)
+          (into (with-meta [] {:portal.viewer/default
+                               :portal.viewer/table}))))))
