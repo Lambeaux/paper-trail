@@ -254,7 +254,7 @@
            :command-history (conj command-history cmd))
     (assoc ctx 
            :commands (drop (:count cmd) cmds)
-           :command-history (into command-history 
+           :command-history (into (conj command-history cmd) 
                                   (take (:count cmd) cmds)))))
 
 (defn process-skip-when
@@ -262,7 +262,7 @@
   (if (get state (:id cmd))
     (assoc ctx
            :commands (drop (:count cmd) cmds)
-           :command-history (into command-history
+           :command-history (into (conj command-history cmd)
                                   (take (:count cmd) cmds)))
     (assoc ctx
            :commands cmds
