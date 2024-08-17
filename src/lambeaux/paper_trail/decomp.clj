@@ -50,11 +50,11 @@
         cond-neg (form->commands (second (drop 2 form)))]
     (concat [{:cmd :begin-form :type :special :op 'if :impl? in-macro-impl?}]
             (form->commands (second form))
-            [{:cmd :capture-state :id id}
-             {:cmd :exec-when :id id :count (count cond-pos)}]
+            [{:cmd :capture-state :state-id id}
+             {:cmd :exec-when :state-id id :count (count cond-pos)}]
             cond-pos
             (when cond-neg
-              [{:cmd :skip-when :id id :count (count cond-neg)}])
+              [{:cmd :skip-when :state-id id :count (count cond-neg)}])
             cond-neg
             [{:cmd :end-form :type :special :op 'if :impl? in-macro-impl?}])))
 
@@ -66,9 +66,15 @@
     (concat [{:cmd :begin-form :type :special :op (first form) :impl? in-macro-impl?}]
             (mapcat (fn [[bname bform]]
                       (concat (form->commands bform)
-                              [{:cmd :bind-name :id bname :impl? in-macro-impl?}]))
+                              [{:cmd :bind-name
+                                :bind-id bname
+                                :bind-from :call-stack
+                                :impl? in-macro-impl?}]))
                     bindings)
             (mapcat form->commands body)
+            (mapcat (fn [[bname _]]
+                      [{:cmd :unbind-name :bind-id bname :impl? in-macro-impl?}])
+                    bindings)
             [{:cmd :end-form :type :special :op (first form) :impl? in-macro-impl?}])))
 
 (defn handle-macro
@@ -112,13 +118,14 @@
                     params)))))
 
 (defn handle-def
-  [{:keys [form->commands in-macro-impl? enable-cmd-gen? args] :as attrs} form]
+  [{:keys [form->commands argdef-stack recur-idx in-macro-impl? enable-cmd-gen? args]
+    :as attrs} form]
   (if enable-cmd-gen?
     (concat [{:cmd :begin-form :type :special :op 'def :impl? in-macro-impl?}]
             (when (> (count form) 2)
               (form->commands attrs (last form)))
             [{:cmd :intern-var
-              :id (second form)
+              :var-id (second form)
               :has-root-binding? (> (count form) 2)
               :impl? in-macro-impl?}
              {:cmd :end-form :type :special :op 'def :impl? in-macro-impl?}])
@@ -130,14 +137,40 @@
       (let [{:keys [argdefs body]} (get (fndef->bodies (last form)) (count args))]
         (concat (map (fn [argdef arg]
                        {:cmd :bind-name
-                        :id argdef
+                        :bind-id argdef
+                        :bind-from :command-value
                         :value arg
-                        :has-val? true
                         :impl? in-macro-impl?})
                      argdefs
                      args)
-                [{:cmd :recur-target :impl? in-macro-impl?}]
-                (form->commands (assoc attrs :enable-cmd-gen? true) body))))))
+                [{:cmd :recur-target :idx recur-idx :impl? in-macro-impl?}]
+                (form->commands
+                 (assoc attrs :enable-cmd-gen? true :argdef-stack (conj argdef-stack argdefs))
+                 body))))))
+
+(defn handle-recur
+  [{:keys [form->commands argdef-stack recur-idx in-macro-impl? enable-cmd-gen? args]
+    :as attrs} form]
+  (concat [{:cmd :begin-form :type :special :op 'recur :impl? in-macro-impl?}]
+          (let [form->commands (partial form->commands attrs)
+                forms (rest form)
+                state-keys (repeatedly (count forms) (fn [] (gensym "recur-")))]
+            (concat (mapcat (fn [k form*]
+                              (concat (form->commands form*)
+                                      [{:cmd :capture-state :state-id k :impl? in-macro-impl?}]))
+                            state-keys
+                            forms)
+                    (mapcat (fn [k argdef]
+                              [{:cmd :unbind-name :bind-id argdef :impl? in-macro-impl?}
+                               {:cmd :bind-name
+                                :bind-id argdef
+                                :bind-from :state
+                                :state-id k
+                                :impl? in-macro-impl?}])
+                            state-keys
+                            (peek argdef-stack))
+                    [{:cmd :replay-commands :idx recur-idx :impl? in-macro-impl?}]))
+          [{:cmd :end-form :type :special :op 'recur :impl? in-macro-impl?}]))
 
 (def form-handlers
   {'def             (wrap-check-macro handle-def)
@@ -145,6 +178,7 @@
    'if              (wrap-check-macro handle-if)
    'let             (wrap-check-macro handle-let)
    'let*            (wrap-check-macro handle-let)
+   'recur           (wrap-check-macro handle-recur)
    :type/list-fn    (wrap-check-macro handle-invoke)
    :type/list-macro (wrap-check-macro handle-macro)})
 
@@ -161,12 +195,16 @@
 (defn create-commands
   ([form]
    (form->commands {:form->commands form->commands
+                    :argdef-stack (list)
+                    :recur-idx 0
                     :in-macro-impl? false
                     :enable-cmd-gen? true}
                    form))
   ([form args]
    (assert (vector? args) "args must be a vector")
    (form->commands {:form->commands form->commands
+                    :argdef-stack (list)
+                    :recur-idx 0
                     :in-macro-impl? false
                     :enable-cmd-gen? false
                     :args args}
@@ -221,45 +259,48 @@
   [{:keys [call-stack state] [cmd & _] :commands :as ctx}]
   (-> ctx
       next-command
-      (assoc :state (assoc state (:id cmd) (peek call-stack)))))
+      (assoc :state (assoc state (:state-id cmd) (peek call-stack)))))
 
 (defn process-bind-name
-  [{:keys [call-stack source-scope impl-scope]
-    [{:keys [id value has-val? impl?]} & _] :commands
+  [{:keys [state call-stack source-scope impl-scope]
+    [{:keys [bind-id bind-from impl? value state-id]} & _] :commands
     :as ctx}]
-  (let [val-to-bind (if has-val?
-                      value
-                      (peek call-stack))
+  (let [val-to-bind (case bind-from
+                      :command-value value
+                      :call-stack (peek call-stack)
+                      :state (get state state-id))
         val-to-bind (case val-to-bind
                       nil ::pt/nil
                       false ::pt/false
                       val-to-bind)]
     (next-command
      (if impl?
-       (assoc ctx :impl-scope (update impl-scope id #(conj % val-to-bind)))
-       (assoc ctx :source-scope (update source-scope id #(conj % val-to-bind)))))))
+       (assoc ctx :impl-scope (update impl-scope bind-id #(conj % val-to-bind)))
+       (assoc ctx :source-scope (update source-scope bind-id #(conj % val-to-bind)))))))
 
 (defn process-unbind-name
-  [{:keys [source-scope impl-scope] [{:keys [id impl?]} & _] :commands :as ctx}]
+  [{:keys [source-scope impl-scope]
+    [{:keys [bind-id impl?]} & _] :commands
+    :as ctx}]
   (next-command
    (if impl?
-     (assoc ctx :impl-scope (update impl-scope id pop))
-     (assoc ctx :source-scope (update source-scope id pop)))))
+     (assoc ctx :impl-scope (update impl-scope bind-id pop))
+     (assoc ctx :source-scope (update source-scope bind-id pop)))))
 
 (defn process-exec-when
   [{:keys [state command-history] [cmd & cmds] :commands :as ctx}]
-  (if (get state (:id cmd))
-    (assoc ctx 
-           :commands cmds 
+  (if (get state (:state-id cmd))
+    (assoc ctx
+           :commands cmds
            :command-history (conj command-history cmd))
-    (assoc ctx 
+    (assoc ctx
            :commands (drop (:count cmd) cmds)
-           :command-history (into (conj command-history cmd) 
+           :command-history (into (conj command-history cmd)
                                   (take (:count cmd) cmds)))))
 
 (defn process-skip-when
   [{:keys [state command-history] [cmd & cmds] :commands :as ctx}]
-  (if (get state (:id cmd))
+  (if (get state (:state-id cmd))
     (assoc ctx
            :commands (drop (:count cmd) cmds)
            :command-history (into (conj command-history cmd)
@@ -267,6 +308,16 @@
     (assoc ctx
            :commands cmds
            :command-history (conj command-history cmd))))
+
+(defn process-replay-commands
+  [{:keys [command-history] [{:keys [idx] :as cmd} & cmds] :commands :as ctx}]
+  (let [cmds-to-replay (take-while (fn [old-cmd]
+                                     (not (and (= :recur-target (:cmd old-cmd))
+                                               (= idx (:idx old-cmd)))))
+                                   command-history)]
+    (assoc ctx
+           :commands (concat cmds-to-replay [cmd] cmds)
+           :command-history (drop (count cmds-to-replay) command-history))))
 
 (def command-handlers
   {:begin-form process-no-op
@@ -278,6 +329,7 @@
    :unbind-name process-unbind-name
    :exec-when process-exec-when
    :skip-when process-skip-when
+   :replay-commands process-replay-commands
    :intern-var process-no-op ;; fix
    :recur-target process-no-op ;; fix
    :not-implemented process-scalar})
