@@ -148,6 +148,31 @@
                  (assoc attrs :enable-cmd-gen? true :argdef-stack (conj argdef-stack argdefs))
                  body))))))
 
+(defn handle-loop
+  [{:keys [form->commands argdef-stack recur-idx in-macro-impl? enable-cmd-gen? args]
+    :as attrs} form]
+  (let [recur-idx (inc recur-idx)
+        bindings (partition 2 (second form))
+        body (drop 2 form)
+        argdefs (into [] (map first bindings))
+        attrs (assoc attrs 
+                     :recur-idx recur-idx 
+                     :argdef-stack (conj argdef-stack argdefs))]
+    (concat [{:cmd :begin-form :type :special :op 'loop :impl? in-macro-impl?}]
+            (mapcat (fn [[bname bform]]
+                      (concat (form->commands attrs bform)
+                              [{:cmd :bind-name
+                                :bind-id bname
+                                :bind-from :call-stack
+                                :impl? in-macro-impl?}]))
+                    bindings)
+            [{:cmd :recur-target :idx recur-idx :impl? in-macro-impl?}]
+            (mapcat #(form->commands attrs %) body)
+            (mapcat (fn [[bname _]]
+                      [{:cmd :unbind-name :bind-id bname :impl? in-macro-impl?}])
+                    bindings)
+            [{:cmd :end-form :type :special :op 'loop :impl? in-macro-impl?}])))
+
 (defn handle-recur
   [{:keys [form->commands argdef-stack recur-idx in-macro-impl? enable-cmd-gen? args]
     :as attrs} form]
@@ -178,6 +203,7 @@
    'if              (wrap-check-macro handle-if)
    'let             (wrap-check-macro handle-let)
    'let*            (wrap-check-macro handle-let)
+   'loop            (wrap-check-macro handle-loop)
    'recur           (wrap-check-macro handle-recur)
    :type/list-fn    (wrap-check-macro handle-invoke)
    :type/list-macro (wrap-check-macro handle-macro)})
