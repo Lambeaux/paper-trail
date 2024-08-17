@@ -176,12 +176,16 @@
 
 (def temp-ctx {::pt/current-ns *ns*})
 
+(defn next-command
+  [{:keys [command-history] [cmd & cmds] :commands :as ctx}]
+  (assoc ctx :commands cmds :command-history (conj command-history cmd)))
+
 (defn process-no-op
-  [{[_cmd & cmds] :commands :as ctx}]
-  (assoc ctx :commands cmds))
+  [ctx]
+  (next-command ctx))
 
 (defn process-invoke
-  [{:keys [call-stack] [cmd & cmds] :commands :as ctx}]
+  [{:keys [call-stack] [cmd & _] :commands :as ctx}]
   (let [arg-count (:arg-count cmd)
         result (apply (core/->impl temp-ctx (:op cmd))
                       (map (core/map-impl-fn temp-ctx)
@@ -194,12 +198,13 @@
                                     (::pt/raw-form (meta arg)))
                                arg))
                          (take arg-count call-stack))]
-    (assoc ctx
-           :commands cmds
-           :call-stack (conj (into (list) (drop arg-count call-stack)) result))))
+    (-> ctx
+        next-command
+        (assoc :call-stack
+               (conj (into (list) (drop arg-count call-stack)) result)))))
 
 (defn process-scalar
-  [{:keys [call-stack source-scope impl-scope] [cmd & cmds] :commands :as ctx}]
+  [{:keys [call-stack source-scope impl-scope] [cmd & _] :commands :as ctx}]
   (let [scalar-form (:form cmd)
         scalar-value (or (peek (get source-scope scalar-form))
                          (peek (get impl-scope scalar-form))
@@ -208,17 +213,19 @@
                        ::pt/nil nil
                        ::pt/false false
                        scalar-value)]
-    (assoc ctx
-           :commands cmds
-           :call-stack (conj call-stack scalar-value))))
+    (-> ctx
+        next-command
+        (assoc :call-stack (conj call-stack scalar-value)))))
 
 (defn process-capture-state
-  [{:keys [call-stack state] [cmd & cmds] :commands :as ctx}]
-  (assoc ctx :commands cmds :state (assoc state (:id cmd) (peek call-stack))))
+  [{:keys [call-stack state] [cmd & _] :commands :as ctx}]
+  (-> ctx
+      next-command
+      (assoc :state (assoc state (:id cmd) (peek call-stack)))))
 
 (defn process-bind-name
   [{:keys [call-stack source-scope impl-scope]
-    [{:keys [id value has-val? impl?]} & cmds] :commands
+    [{:keys [id value has-val? impl?]} & _] :commands
     :as ctx}]
   (let [val-to-bind (if has-val?
                       value
@@ -227,27 +234,39 @@
                       nil ::pt/nil
                       false ::pt/false
                       val-to-bind)]
-    (if impl?
-      (assoc ctx :commands cmds :impl-scope (update impl-scope id #(conj % val-to-bind)))
-      (assoc ctx :commands cmds :source-scope (update source-scope id #(conj % val-to-bind))))))
+    (next-command
+     (if impl?
+       (assoc ctx :impl-scope (update impl-scope id #(conj % val-to-bind)))
+       (assoc ctx :source-scope (update source-scope id #(conj % val-to-bind)))))))
 
 (defn process-unbind-name
-  [{:keys [source-scope impl-scope] [{:keys [id impl?]} & cmds] :commands :as ctx}]
-  (if impl?
-    (assoc ctx :commands cmds :impl-scope (update impl-scope id pop))
-    (assoc ctx :commands cmds :source-scope (update source-scope id pop))))
+  [{:keys [source-scope impl-scope] [{:keys [id impl?]} & _] :commands :as ctx}]
+  (next-command
+   (if impl?
+     (assoc ctx :impl-scope (update impl-scope id pop))
+     (assoc ctx :source-scope (update source-scope id pop)))))
 
 (defn process-exec-when
-  [{:keys [state] [cmd & cmds] :commands :as ctx}]
+  [{:keys [state command-history] [cmd & cmds] :commands :as ctx}]
   (if (get state (:id cmd))
-    (assoc ctx :commands cmds)
-    (assoc ctx :commands (drop (:count cmd) cmds))))
+    (assoc ctx 
+           :commands cmds 
+           :command-history (conj command-history cmd))
+    (assoc ctx 
+           :commands (drop (:count cmd) cmds)
+           :command-history (into command-history 
+                                  (take (:count cmd) cmds)))))
 
 (defn process-skip-when
-  [{:keys [state] [cmd & cmds] :commands :as ctx}]
+  [{:keys [state command-history] [cmd & cmds] :commands :as ctx}]
   (if (get state (:id cmd))
-    (assoc ctx :commands (drop (:count cmd) cmds))
-    (assoc ctx :commands cmds)))
+    (assoc ctx
+           :commands (drop (:count cmd) cmds)
+           :command-history (into command-history
+                                  (take (:count cmd) cmds)))
+    (assoc ctx
+           :commands cmds
+           :command-history (conj command-history cmd))))
 
 (def command-handlers
   {:begin-form process-no-op
@@ -266,6 +285,7 @@
 (defn new-ctx
   [commands]
   {:commands commands
+   :command-history (list)
    :call-stack (list)
    :source-scope {}
    :impl-scope {}
