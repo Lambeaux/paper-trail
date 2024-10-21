@@ -8,7 +8,7 @@
                   :main-opts ["-m" "cognitect.test-runner"]
                   :exec-fn cognitect.test-runner.api/test}
            :cider-clj {:extra-deps {aero/aero {:mvn/version "1.1.6"}
-                                    cider/cider-nrepl {:mvn/version "0.37.0"}}
+                                    cider/cider-nrepl {:mvn/version "0.50.2"}}
                        :main-opts ["-m"
                                    "nrepl.cmdline"
                                    "--middleware"
