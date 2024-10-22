@@ -155,8 +155,8 @@
         bindings (partition 2 (second form))
         body (drop 2 form)
         argdefs (into [] (map first bindings))
-        attrs (assoc attrs 
-                     :recur-idx recur-idx 
+        attrs (assoc attrs
+                     :recur-idx recur-idx
                      :argdef-stack (conj argdef-stack argdefs))]
     (concat [{:cmd :begin-form :type :special :op 'loop :impl? in-macro-impl?}]
             (mapcat (fn [[bname bform]]
@@ -241,16 +241,18 @@
 (def temp-ctx {::pt/current-ns *ns*})
 
 (defn next-command
-  [{:keys [command-history] [cmd & cmds] :commands :as ctx}]
-  (assoc ctx :commands cmds :command-history (conj command-history cmd)))
+  [{:keys [command-history] [cmd & cmds] :commands :as fctx}]
+  (assoc fctx :commands cmds :command-history (conj command-history cmd)))
 
 (defn process-no-op
-  [ctx]
-  (next-command ctx))
+  [{:keys [fn-idx] :as ctx}]
+  (update-in ctx [:fn-stack fn-idx] next-command))
 
 (defn process-invoke
-  [{:keys [call-stack] [cmd & _] :commands :as ctx}]
-  (let [arg-count (:arg-count cmd)
+  [{:keys [fn-idx] :as ctx}]
+  (let [fctx (get-in ctx [:fn-stack fn-idx])
+        {:keys [call-stack] [cmd & _] :commands} fctx
+        arg-count (:arg-count cmd)
         result (apply (core/->impl temp-ctx (:op cmd))
                       (map (core/map-impl-fn temp-ctx)
                            (take arg-count call-stack)))
@@ -262,17 +264,20 @@
                                     (::pt/raw-form (meta arg)))
                                arg))
                          (take arg-count call-stack))]
-    (-> ctx
-        next-command
-        (assoc :call-stack
-               (conj (->> (drop arg-count call-stack)
-                          (reverse)
-                          (into (list)))
-                     result)))))
+    (update-in ctx [:fn-stack fn-idx]
+               #(-> %
+                    next-command
+                    (assoc :call-stack
+                           (conj (->> (drop arg-count call-stack)
+                                      (reverse)
+                                      (into (list)))
+                                 result))))))
 
 (defn process-scalar
-  [{:keys [call-stack source-scope impl-scope] [cmd & _] :commands :as ctx}]
-  (let [scalar-form (:form cmd)
+  [{:keys [fn-idx] :as ctx}]
+  (let [fctx (get-in ctx [:fn-stack fn-idx])
+        {:keys [call-stack source-scope impl-scope] [cmd & _] :commands} fctx
+        scalar-form (:form cmd)
         scalar-value (or (peek (get source-scope scalar-form))
                          (peek (get impl-scope scalar-form))
                          scalar-form)
@@ -280,21 +285,26 @@
                        ::pt/nil nil
                        ::pt/false false
                        scalar-value)]
-    (-> ctx
-        next-command
-        (assoc :call-stack (conj call-stack scalar-value)))))
+    (update-in ctx [:fn-stack fn-idx]
+               #(-> %
+                    next-command
+                    (assoc :call-stack (conj call-stack scalar-value))))))
 
 (defn process-capture-state
-  [{:keys [call-stack state] [cmd & _] :commands :as ctx}]
-  (-> ctx
-      next-command
-      (assoc :state (assoc state (:state-id cmd) (peek call-stack)))))
+  [{:keys [fn-idx] :as ctx}]
+  (let [fctx (get-in ctx [:fn-stack fn-idx])
+        {:keys [call-stack state] [cmd & _] :commands} fctx]
+    (update-in ctx [:fn-stack fn-idx]
+               #(-> %
+                    next-command
+                    (assoc :state (assoc state (:state-id cmd) (peek call-stack)))))))
 
 (defn process-bind-name
-  [{:keys [state call-stack source-scope impl-scope]
-    [{:keys [bind-id bind-from impl? value state-id]} & _] :commands
-    :as ctx}]
-  (let [val-to-bind (case bind-from
+  [{:keys [fn-idx] :as ctx}]
+  (let [fctx (get-in ctx [:fn-stack fn-idx])
+        {:keys [state call-stack source-scope impl-scope]
+         [{:keys [bind-id bind-from impl? value state-id]} & _] :commands} fctx
+        val-to-bind (case bind-from
                       :command-value value
                       :call-stack (peek call-stack)
                       :state (get state state-id))
@@ -302,51 +312,65 @@
                       nil ::pt/nil
                       false ::pt/false
                       val-to-bind)]
-    (next-command
-     (if impl?
-       (assoc ctx :impl-scope (update impl-scope bind-id #(conj % val-to-bind)))
-       (assoc ctx :source-scope (update source-scope bind-id #(conj % val-to-bind)))))))
+    (update-in ctx [:fn-stack fn-idx]
+               (fn [m]
+                 (next-command
+                  (if impl?
+                    (assoc m :impl-scope
+                           (update impl-scope bind-id #(conj % val-to-bind)))
+                    (assoc m :source-scope
+                           (update source-scope bind-id #(conj % val-to-bind)))))))))
 
 (defn process-unbind-name
-  [{:keys [source-scope impl-scope]
-    [{:keys [bind-id impl?]} & _] :commands
-    :as ctx}]
-  (next-command
-   (if impl?
-     (assoc ctx :impl-scope (update impl-scope bind-id pop))
-     (assoc ctx :source-scope (update source-scope bind-id pop)))))
+  [{:keys [fn-idx] :as ctx}]
+  (let [fctx (get-in ctx [:fn-stack fn-idx])
+        {:keys [source-scope impl-scope] [{:keys [bind-id impl?]} & _] :commands} fctx]
+    (update-in ctx [:fn-stack fn-idx]
+               #(next-command
+                 (if impl?
+                   (assoc % :impl-scope (update impl-scope bind-id pop))
+                   (assoc % :source-scope (update source-scope bind-id pop)))))))
 
 (defn process-exec-when
-  [{:keys [state command-history] [cmd & cmds] :commands :as ctx}]
-  (if (get state (:state-id cmd))
-    (assoc ctx
-           :commands cmds
-           :command-history (conj command-history cmd))
-    (assoc ctx
-           :commands (drop (:count cmd) cmds)
-           :command-history (into (conj command-history cmd)
-                                  (take (:count cmd) cmds)))))
+  [{:keys [fn-idx] :as ctx}]
+  (let [fctx (get-in ctx [:fn-stack fn-idx])
+        {:keys [state command-history] [cmd & cmds] :commands} fctx]
+    (update-in ctx [:fn-stack fn-idx]
+               #(if (get state (:state-id cmd))
+                  (assoc %
+                         :commands cmds
+                         :command-history (conj command-history cmd))
+                  (assoc %
+                         :commands (drop (:count cmd) cmds)
+                         :command-history (into (conj command-history cmd)
+                                                (take (:count cmd) cmds)))))))
 
 (defn process-skip-when
-  [{:keys [state command-history] [cmd & cmds] :commands :as ctx}]
-  (if (get state (:state-id cmd))
-    (assoc ctx
-           :commands (drop (:count cmd) cmds)
-           :command-history (into (conj command-history cmd)
-                                  (take (:count cmd) cmds)))
-    (assoc ctx
-           :commands cmds
-           :command-history (conj command-history cmd))))
+  [{:keys [fn-idx] :as ctx}]
+  (let [fctx (get-in ctx [:fn-stack fn-idx])
+        {:keys [state command-history] [cmd & cmds] :commands} fctx]
+    (update-in ctx [:fn-stack fn-idx]
+               #(if (get state (:state-id cmd))
+                  (assoc %
+                         :commands (drop (:count cmd) cmds)
+                         :command-history (into (conj command-history cmd)
+                                                (take (:count cmd) cmds)))
+                  (assoc %
+                         :commands cmds
+                         :command-history (conj command-history cmd))))))
 
 (defn process-replay-commands
-  [{:keys [command-history] [{:keys [idx] :as cmd} & cmds] :commands :as ctx}]
-  (let [cmds-to-replay (take-while (fn [old-cmd]
+  [{:keys [fn-idx] :as ctx}]
+  (let [fctx (get-in ctx [:fn-stack fn-idx])
+        {:keys [command-history] [{:keys [idx] :as cmd} & cmds] :commands} fctx
+        cmds-to-replay (take-while (fn [old-cmd]
                                      (not (and (= :recur-target (:cmd old-cmd))
                                                (= idx (:idx old-cmd)))))
                                    command-history)]
-    (assoc ctx
-           :commands (concat (reverse cmds-to-replay) [cmd] cmds)
-           :command-history (drop (count cmds-to-replay) command-history))))
+    (update-in ctx [:fn-stack fn-idx]
+               #(assoc %
+                       :commands (concat (reverse cmds-to-replay) [cmd] cmds)
+                       :command-history (drop (count cmds-to-replay) command-history)))))
 
 (def command-handlers
   {:begin-form process-no-op
@@ -363,7 +387,7 @@
    :recur-target process-no-op ;; fix
    :not-implemented process-scalar})
 
-(defn new-ctx
+(defn new-fn-ctx
   [commands]
   {:commands commands
    :command-history (list)
@@ -372,10 +396,17 @@
    :impl-scope {}
    :state {}})
 
+(defn new-exec-ctx
+  [commands]
+  {:fn-idx 0
+   :fn-stack [(new-fn-ctx commands)]
+   :throwing? false})
+
 (defn execute
   [commands]
-  (loop [{:keys [commands call-stack] :as ctx} (new-ctx commands)]
-    (let [h (get command-handlers (:cmd (first commands)))]
+  (loop [{:keys [fn-idx] :as ctx} (new-exec-ctx commands)]
+    (let [{:keys [commands call-stack] :as fctx} (get-in ctx [:fn-stack fn-idx])
+          h (get command-handlers (:cmd (first commands)))]
       (if h
         (recur (h ctx))
         (first call-stack)))))
@@ -384,11 +415,12 @@
   [input]
   (cond
     (seq? input)
-    (ctx-seq (new-ctx input))
+    (ctx-seq (new-exec-ctx input))
     (map? input)
     (cons input (lazy-seq
-                 (let [h (get command-handlers
-                              (:cmd (first (:commands input))))]
+                 (let [fctx (get-in input [:fn-stack (:fn-idx input)])
+                       h (get command-handlers
+                              (:cmd (first (:commands fctx))))]
                    (when h
                      (ctx-seq (h input))))))
     :else
@@ -416,6 +448,9 @@
                 (create-commands form))]
      (->> cmds
           (ctx-seq)
+          (map (fn [{:keys [fn-idx throwing?] :as ctx}]
+                 (-> (get-in ctx [:fn-stack fn-idx])
+                     (assoc :throwing? throwing?))))
           (map (fn [{:keys [commands] :as ctx}]
                  (-> ctx
                      (assoc :next-command (first commands))
