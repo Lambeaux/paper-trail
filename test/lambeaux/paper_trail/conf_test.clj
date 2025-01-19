@@ -7,6 +7,13 @@
   [msg & forms]
   `(testing ~msg
      (do ~@(map (fn [form]
+                  ;; Possibly move '~form to a let binding
+                  ;; due to expansion/evaluation side effects.
+                  ;; ---
+                  ;; In this case it's probably fine because
+                  ;; we're just using the form "as data". However,
+                  ;; if any atoms or other state are not local to
+                  ;; the form, the test results might be skewed.
                   `(testing (str '~form)
                      (is (= (eval '~form)
                             (ptd/run-eval '~form)))))
