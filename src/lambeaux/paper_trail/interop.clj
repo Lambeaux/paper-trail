@@ -1,5 +1,122 @@
 (ns lambeaux.paper-trail.interop
-  (:require [paper.trail :as-alias pt]))
+  (:require [lambeaux.paper-trail.interop-proto :as proto]
+            [paper.trail :as-alias pt]))
+
+;; ----------------------------------------------------------------------------------------
+;; LIST HELPERS
+;; ----------------------------------------------------------------------------------------
+
+(defn collcat*
+  [f & args]
+  (->> args
+       (map (fn [x] (if (:expand? (meta x)) x [x])))
+       (apply concat)
+       (apply f)))
+
+(defn listcat* [& args] (apply collcat* list args))
+(defn vectcat* [& args] (apply collcat* vector args))
+
+(defn expand*
+  [x]
+  (vary-meta x assoc :expand? true))
+
+(defmacro listcat
+  "Create a list from the supplied args. Wrap any arg (that's a sequental value) with the 
+   (expand) macro to concat its elements into the list."
+  [& args]
+  `(listcat* ~@args))
+
+(defmacro vectcat
+  "Like (listcat) but for vectors."
+  [& args]
+  `(vectcat* ~@args))
+
+(defmacro expand
+  "Provides a hint to (listcat) or (vectcat) that the provided arg is a sequential value 
+   and should have its elements appended into the collection."
+  [x]
+  `(expand* ~x))
+
+;; ----------------------------------------------------------------------------------------
+;; CLOJURE IFN GENERATION
+;; ----------------------------------------------------------------------------------------
+
+;; look at clojure/lang/IFn.java to see where this constant came from
+;; it's the max number of args, excluding the variadic array
+(def max-args 20)
+
+(defn generate-apply-to
+  "Generates an applyTo implementation similar to the Clojure 
+   AFn implementation."
+  [seq-sym]
+  (let [->seq-call (fn [seq-sym* seq-count*]
+                     (->> (range 0 seq-count*)
+                          (map (fn [i] (list 'nth seq-sym* i)))
+                          (concat ['this])
+                          (apply list)))
+        seq-count-idxs (range 0 (inc max-args))]
+    (list 'applyTo ['this seq-sym]
+          (listcat 'case
+                   (list 'count seq-sym)
+                   (expand (->> seq-count-idxs
+                                (map (partial ->seq-call seq-sym))
+                                (interleave seq-count-idxs)))
+                   (listcat (expand (->seq-call seq-sym max-args))
+                            (list 'into-array 'Object (list 'drop max-args seq-sym)))))))
+
+(defn generate-ifn-sigs
+  "Generate defrecord signatures for implementing IFn, where all the
+   impls delegate to a fn call named by fsym."
+  [fsym]
+  (let [i->args (fn [i]
+                  (->> (range 1 (inc i))
+                       (mapv #(symbol (str "arg" %)))))
+        i->impl (fn [i]
+                  (let [args (i->args i)]
+                    (list 'invoke
+                          (into ['this] args)
+                          (list fsym 'this args))))]
+    (listcat (expand
+              (map i->impl (range 0 (inc max-args))))
+             (let [args (i->args max-args)]
+               (list 'invoke
+                     (conj (into ['this] args) 'var-args)
+                     (list fsym 'this (list 'concat
+                                            args
+                                            (list 'into [] 'var-args)))))
+             (generate-apply-to 'coll))))
+
+(defmacro defcallable
+  "Like defrecord but provides an impl of IFn."
+  [name fields & body]
+  (let [ifn-impl (generate-ifn-sigs 'proto/call)]
+    `(defrecord ~name ~fields
+       ~@body
+       clojure.lang.IFn
+       ~@ifn-impl)))
+
+;; ----------------------------------------------------------------------------------------
+;; FN PROTOS / RECORDS
+;; ----------------------------------------------------------------------------------------
+
+(comment
+  #{java.io.Serializable
+    java.util.Comparator
+    clojure.lang.IObj
+    clojure.lang.IFn
+    clojure.lang.Fn})
+
+(defcallable SourceFetchFn  []
+  proto/InterpretedFn
+  (call [this args] {:type (type this) :args args}))
+
+(defcallable SourceCachedFn  []
+  proto/InterpretedFn
+  (call [_this _args] (throw (ex-info "Not implemented" {}))))
+
+;; ----------------------------------------------------------------------------------------
+;; REFLECTIVE EXPLORATION / UTILS
+;; ----------------------------------------------------------------------------------------
 
 (def ->class-data
   "Get some interesting metadata for a given Java object."
@@ -24,6 +141,10 @@
   "Returns the set of all interfaces implemented by obj."
   [obj]
   (into #{} (mapcat :interfaces (all-supers obj))))
+
+;; ----------------------------------------------------------------------------------------
+;; INTEROP NOTES
+;; ----------------------------------------------------------------------------------------
 
 (comment
 
