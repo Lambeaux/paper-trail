@@ -372,20 +372,28 @@
                        :commands (concat (reverse cmds-to-replay) [cmd] cmds)
                        :command-history (drop (count cmds-to-replay) command-history)))))
 
+(defn wrap-uncaught-ex
+  [handler]
+  (fn [ctx]
+    (try
+      (handler ctx)
+      (catch Exception e
+        (throw (ex-info "Uncaught interpreter exception" ctx e))))))
+
 (def command-handlers
-  {:begin-form process-no-op
-   :end-form process-no-op
-   :invoke-fn process-invoke
-   :scalar process-scalar
-   :capture-state process-capture-state
-   :bind-name process-bind-name
-   :unbind-name process-unbind-name
-   :exec-when process-exec-when
-   :skip-when process-skip-when
-   :replay-commands process-replay-commands
-   :intern-var process-no-op ;; fix
-   :recur-target process-no-op ;; fix
-   :not-implemented process-scalar})
+  {:begin-form      (wrap-uncaught-ex process-no-op)
+   :end-form        (wrap-uncaught-ex process-no-op)
+   :invoke-fn       (wrap-uncaught-ex process-invoke)
+   :scalar          (wrap-uncaught-ex process-scalar)
+   :capture-state   (wrap-uncaught-ex process-capture-state)
+   :bind-name       (wrap-uncaught-ex process-bind-name)
+   :unbind-name     (wrap-uncaught-ex process-unbind-name)
+   :exec-when       (wrap-uncaught-ex process-exec-when)
+   :skip-when       (wrap-uncaught-ex process-skip-when)
+   :replay-commands (wrap-uncaught-ex process-replay-commands)
+   :intern-var      (wrap-uncaught-ex process-no-op) ;; fix
+   :recur-target    (wrap-uncaught-ex process-no-op) ;; fix
+   :not-implemented (wrap-uncaught-ex process-scalar)})
 
 (defn new-fn-ctx
   [commands]
