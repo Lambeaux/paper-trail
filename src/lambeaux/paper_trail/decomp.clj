@@ -44,6 +44,7 @@
 
 (defn handle-if
   [{:keys [form->commands in-macro-impl?] :as attrs} form]
+  ;; TODO Investigate: if the repl remains alive for weeks, will we run out of gensyms?
   (let [id (gensym "if-")
         form->commands (partial form->commands attrs)
         cond-pos (form->commands (first (drop 2 form)))
@@ -179,6 +180,7 @@
   (concat [{:cmd :begin-form :type :special :op 'recur :impl? in-macro-impl?}]
           (let [form->commands (partial form->commands attrs)
                 forms (rest form)
+                ;; TODO Investigate: if the repl remains alive for weeks, will we run out of gensyms?
                 state-keys (repeatedly (count forms) (fn [] (gensym "recur-")))]
             (concat (mapcat (fn [k form*]
                               (concat (form->commands form*)
@@ -197,6 +199,69 @@
                     [{:cmd :replay-commands :idx recur-idx :impl? in-macro-impl?}]))
           [{:cmd :end-form :type :special :op 'recur :impl? in-macro-impl?}]))
 
+(defn catch->cmds
+  [{:keys [form->commands in-macro-impl?] :as attrs} ex-sym body]
+  (let [form->commands (partial form->commands attrs)]
+    (concat [{:cmd :begin-form :type :special :op 'catch :impl? in-macro-impl?}
+             {:cmd :bind-name :bind-id ex-sym :bind-from :call-stack :impl? in-macro-impl?}]
+            (mapcat form->commands body)
+            [{:cmd :unbind-name :bind-id ex-sym :impl? in-macro-impl?}
+             {:cmd :end-form :type :special :op 'catch :impl? in-macro-impl?}])))
+
+(defn finally->cmds
+  [{:keys [form->commands in-macro-impl?] :as attrs} body]
+  (let [form->commands (partial form->commands attrs)]
+    (concat [{:cmd :begin-form :type :special :op 'finally :impl? in-macro-impl?}]
+            (mapcat form->commands body)
+            [{:cmd :end-form :type :special :op 'finally :impl? in-macro-impl?}])))
+
+(defn code-form?
+  [form sym]
+  (and (sequential? form)
+       (= sym (first form))))
+
+(defn catch-form?
+  [form]
+  (code-form? form 'catch))
+
+(defn finally-form?
+  [form]
+  (code-form? form 'finally))
+
+(defn handle-try-catch-finally
+  [{:keys [form->commands in-macro-impl?] :as attrs} form]
+  (let [form->commands (partial form->commands attrs)
+        args (rest form)
+        finally* (let [finally? (last args)]
+                   (when (finally-form? finally?) finally?))
+        args*   (if-not finally* args (butlast args))
+        body    (take-while (complement catch-form?) args*)
+        catches (drop-while (complement catch-form?) args*)]
+    (concat [{:cmd :begin-form :type :special :op 'try :impl? in-macro-impl?}
+             ;; TODO: need an ID for the specific (try) block
+             {:cmd :setup-try
+              :catches (mapv (fn [[op clazz-sym ex-sym & body]]
+                               (assert (= op 'catch)
+                                       "Only catch statements allowed here")
+                               (hash-map :ex-class (resolve clazz-sym)
+                                         :commands (catch->cmds attrs ex-sym body)))
+                             catches)
+              :finally (when finally*
+                         (finally->cmds attrs (rest finally*)))
+              :impl? in-macro-impl?}]
+            (mapcat form->commands body)
+            [{:cmd :end-form :type :special :op 'try :impl? in-macro-impl?}])))
+
+(defn handle-throw
+  [{:keys [form->commands in-macro-impl?] :as attrs} form]
+  (assert (= 2 (count form))
+          "Invalid arguments to throw, expects single throwable instance")
+  (let [cmds (form->commands attrs (second form))]
+    (concat [{:cmd :begin-form :type :special :op 'throw :impl? in-macro-impl?}]
+            cmds
+            [{:cmd :invoke-throw}
+             {:cmd :end-form :type :special :op 'throw :impl? in-macro-impl?}])))
+
 (def form-handlers
   {'def             (wrap-check-macro handle-def)
    'do              (wrap-check-macro handle-do)
@@ -205,6 +270,10 @@
    'let*            (wrap-check-macro handle-let)
    'loop            (wrap-check-macro handle-loop)
    'recur           (wrap-check-macro handle-recur)
+   'throw           (wrap-check-macro handle-throw)
+   'try             (wrap-check-macro handle-try-catch-finally)
+   'catch           (constantly nil)
+   'finally         (constantly nil)
    :type/list-fn    (wrap-check-macro handle-invoke)
    :type/list-macro (wrap-check-macro handle-macro)})
 
@@ -238,6 +307,11 @@
 
 ;; ----------------------------------------------------------------------------------------
 
+(defn ctx-find-catch
+  ;; TODO: need an implementation here
+  []
+  ())
+
 (def temp-ctx {::pt/current-ns *ns*})
 
 (defn next-command
@@ -248,14 +322,21 @@
   [{:keys [fn-idx] :as ctx}]
   (update-in ctx [:fn-stack fn-idx] next-command))
 
-(defn process-invoke
+(defn process-invoke-fn
   [{:keys [fn-idx] :as ctx}]
   (let [fctx (get-in ctx [:fn-stack fn-idx])
         {:keys [call-stack] [cmd & _] :commands} fctx
         arg-count (:arg-count cmd)
-        result (apply (core/->impl temp-ctx (:op cmd))
-                      (map (core/map-impl-fn temp-ctx)
-                           (take arg-count call-stack)))
+        ;; TODO: pivot on 'ex?' somewhere
+        [ex? result] (try
+                       [false (apply (core/->impl temp-ctx (:op cmd))
+                                     (map (core/map-impl-fn temp-ctx)
+                                          (take arg-count call-stack)))]
+                       ;; JVM Note: typical applications should not catch throwable
+                       ;; if you copy this pattern, make sure you know what you're doing
+                       ;; (catch Throwable t [true t])
+                       ;; TODO: eventually support Throwable for more accurate results
+                       (catch Exception e [true e]))
         result (if (instance? IObj result)
                  (with-meta result {::pt/is-evaled? true})
                  result)
@@ -272,6 +353,12 @@
                                       (reverse)
                                       (into (list)))
                                  result))))))
+
+(defn process-invoke-throw
+  [{:keys [fn-idx] :as ctx}]
+  (let [{:keys [call-stack]} (get-in ctx [:fn-stack fn-idx])]
+    ;; TODO: don't actually throw, resolve the ctx against the stack and try-handlers
+    (throw (first call-stack))))
 
 (defn process-scalar
   [{:keys [fn-idx] :as ctx}]
@@ -372,6 +459,15 @@
                        :commands (concat (reverse cmds-to-replay) [cmd] cmds)
                        :command-history (drop (count cmds-to-replay) command-history)))))
 
+(defn process-setup-try
+  [{:keys [fn-idx try-handlers] :as ctx}]
+  (let [{[cmd] :commands :as _fctx} (get-in ctx [:fn-stack fn-idx])]
+    (assoc ctx :try-handlers
+           (conj try-handlers
+                 ;; TODO: need an ID for the specific (try) block
+                 (merge (select-keys ctx [:fn-idx])
+                        (select-keys cmd [:catches :finally]))))))
+
 (defn wrap-uncaught-ex
   [handler]
   (fn [ctx]
@@ -383,7 +479,8 @@
 (def command-handlers
   {:begin-form      (wrap-uncaught-ex process-no-op)
    :end-form        (wrap-uncaught-ex process-no-op)
-   :invoke-fn       (wrap-uncaught-ex process-invoke)
+   :invoke-fn       (wrap-uncaught-ex process-invoke-fn)
+   :invoke-throw    (wrap-uncaught-ex process-invoke-throw)
    :scalar          (wrap-uncaught-ex process-scalar)
    :capture-state   (wrap-uncaught-ex process-capture-state)
    :bind-name       (wrap-uncaught-ex process-bind-name)
@@ -391,8 +488,11 @@
    :exec-when       (wrap-uncaught-ex process-exec-when)
    :skip-when       (wrap-uncaught-ex process-skip-when)
    :replay-commands (wrap-uncaught-ex process-replay-commands)
-   :intern-var      (wrap-uncaught-ex process-no-op) ;; fix
-   :recur-target    (wrap-uncaught-ex process-no-op) ;; fix
+   :setup-try       (wrap-uncaught-ex process-setup-try)
+   ;; --------------------------------------------------------------------------
+   :intern-var      (wrap-uncaught-ex process-no-op) ;; TODO: fix
+   :recur-target    (wrap-uncaught-ex process-no-op) ;; TODO: fix
+   ;; --------------------------------------------------------------------------
    :not-implemented (wrap-uncaught-ex process-scalar)})
 
 (defn new-fn-ctx
@@ -408,6 +508,7 @@
   [commands]
   {:fn-idx 0
    :fn-stack [(new-fn-ctx commands)]
+   :try-handlers (list)
    :throwing? false})
 
 (defn execute
