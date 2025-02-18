@@ -236,10 +236,11 @@
                    (when (finally-form? finally?) finally?))
         args*   (if-not finally* args (butlast args))
         body    (take-while (complement catch-form?) args*)
-        catches (drop-while (complement catch-form?) args*)]
+        catches (drop-while (complement catch-form?) args*)
+        id      (gensym "try-")]
     (concat [{:cmd :begin-form :type :special :op 'try :impl? in-macro-impl?}
-             ;; TODO: need an ID for the specific (try) block
              {:cmd :setup-try
+              :id id
               :catches (mapv (fn [[op clazz-sym ex-sym & body]]
                                (assert (= op 'catch)
                                        "Only catch statements allowed here")
@@ -250,7 +251,8 @@
                          (finally->cmds attrs (rest finally*)))
               :impl? in-macro-impl?}]
             (mapcat form->commands body)
-            [{:cmd :end-form :type :special :op 'try :impl? in-macro-impl?}])))
+            [{:cmd :cleanup-try :id id :impl? in-macro-impl?}
+             {:cmd :end-form :type :special :op 'try :impl? in-macro-impl?}])))
 
 (defn handle-throw
   [{:keys [form->commands in-macro-impl?] :as attrs} form]
@@ -307,6 +309,37 @@
 
 ;; ----------------------------------------------------------------------------------------
 
+(comment
+  "TODO (Later): Come back and revisit some cases regarding 'apply'"
+  ;; does not use varadic
+  (apply update-in [{:k []}
+                    [:k 0]
+                    (fn [m & args] (apply assoc m [:x 1 :args args]))]))
+
+(defn with-keyvals
+  [& kvs]
+  (fn [m] (apply assoc m kvs)))
+
+(defn update-fn-ctx
+  [{:keys [fn-idx] :as ctx} f & args]
+  (apply update-in (concat [ctx [:fn-stack fn-idx] f] args)))
+
+(defn next-command
+  [{:keys [command-history]
+    [cmd & cmds] :commands
+    :as ctx}]
+  (update-fn-ctx ctx (with-keyvals
+                       :commands cmds
+                       :command-history (conj command-history cmd))))
+
+(defn default-update
+  ([ctx kvs]
+   (default-update ctx true kvs))
+  ([ctx consume-command? kvs]
+   (cond-> ctx
+     consume-command? next-command
+     true (update-fn-ctx (apply with-keyvals kvs)))))
+
 (defn ctx-find-catch
   ;; TODO: need an implementation here
   []
@@ -314,20 +347,17 @@
 
 (def temp-ctx {::pt/current-ns *ns*})
 
-(defn next-command
-  [{:keys [command-history] [cmd & cmds] :commands :as fctx}]
-  (assoc fctx :commands cmds :command-history (conj command-history cmd)))
+;; ----------------------------------------------------------------------------------------
 
 (defn process-no-op
-  [{:keys [fn-idx] :as ctx}]
-  (update-in ctx [:fn-stack fn-idx] next-command))
+  [ctx]
+  (next-command ctx))
 
 (defn process-invoke-fn
-  [{:keys [fn-idx] :as ctx}]
-  (let [fctx (get-in ctx [:fn-stack fn-idx])
-        {:keys [call-stack] [cmd & _] :commands} fctx
-        arg-count (:arg-count cmd)
-        ;; TODO: pivot on 'ex?' somewhere
+  [{:keys [enable-try-catch-support? call-stack]
+    [cmd & _] :commands
+    :as ctx}]
+  (let [arg-count (:arg-count cmd)
         [ex? result] (try
                        [false (apply (core/->impl temp-ctx (:op cmd))
                                      (map (core/map-impl-fn temp-ctx)
@@ -345,26 +375,26 @@
                                     (::pt/raw-form (meta arg)))
                                arg))
                          (take arg-count call-stack))]
-    (update-in ctx [:fn-stack fn-idx]
-               #(-> %
-                    next-command
-                    (assoc :call-stack
-                           (conj (->> (drop arg-count call-stack)
-                                      (reverse)
-                                      (into (list)))
-                                 result))))))
+    (when (and ex? (not enable-try-catch-support?))
+      (throw result))
+    (-> ctx
+        (assoc :throwing? ex?)
+        (default-update
+         [:call-stack (conj (apply list (drop arg-count call-stack))
+                            result)]))))
 
 (defn process-invoke-throw
-  [{:keys [fn-idx] :as ctx}]
-  (let [{:keys [call-stack]} (get-in ctx [:fn-stack fn-idx])]
-    ;; TODO: don't actually throw, resolve the ctx against the stack and try-handlers
-    (throw (first call-stack))))
+  [{:keys [call-stack]
+    [_cmd & _] :commands
+    :as _ctx}]
+  ;; TODO: don't actually throw, resolve the ctx against the stack and try-handlers
+  (throw (first call-stack)))
 
 (defn process-scalar
-  [{:keys [fn-idx] :as ctx}]
-  (let [fctx (get-in ctx [:fn-stack fn-idx])
-        {:keys [call-stack source-scope impl-scope] [cmd & _] :commands} fctx
-        scalar-form (:form cmd)
+  [{:keys [call-stack source-scope impl-scope]
+    [cmd & _] :commands
+    :as ctx}]
+  (let [scalar-form (:form cmd)
         scalar-value (or (peek (get source-scope scalar-form))
                          (peek (get impl-scope scalar-form))
                          scalar-form)
@@ -372,92 +402,90 @@
                        ::pt/nil nil
                        ::pt/false false
                        scalar-value)]
-    (update-in ctx [:fn-stack fn-idx]
-               #(-> %
-                    next-command
-                    (assoc :call-stack (conj call-stack scalar-value))))))
+    (default-update ctx [:call-stack (conj call-stack scalar-value)])))
+
+;; ----------------------------------------------------------------------------------------
 
 (defn process-capture-state
-  [{:keys [fn-idx] :as ctx}]
-  (let [fctx (get-in ctx [:fn-stack fn-idx])
-        {:keys [call-stack state] [cmd & _] :commands} fctx]
-    (update-in ctx [:fn-stack fn-idx]
-               #(-> %
-                    next-command
-                    (assoc :state (assoc state (:state-id cmd) (peek call-stack)))))))
+  [{:keys [call-stack state]
+    [cmd & _] :commands
+    :as ctx}]
+  (default-update ctx [:state (assoc state (:state-id cmd) (peek call-stack))]))
 
 (defn process-bind-name
-  [{:keys [fn-idx] :as ctx}]
-  (let [fctx (get-in ctx [:fn-stack fn-idx])
-        {:keys [state call-stack source-scope impl-scope]
-         [{:keys [bind-id bind-from impl? value state-id]} & _] :commands} fctx
-        val-to-bind (case bind-from
-                      :command-value value
-                      :call-stack (peek call-stack)
-                      :state (get state state-id))
-        val-to-bind (case val-to-bind
-                      nil ::pt/nil
-                      false ::pt/false
-                      val-to-bind)]
-    (update-in ctx [:fn-stack fn-idx]
-               (fn [m]
-                 (next-command
-                  (if impl?
-                    (assoc m :impl-scope
-                           (update impl-scope bind-id #(conj % val-to-bind)))
-                    (assoc m :source-scope
-                           (update source-scope bind-id #(conj % val-to-bind)))))))))
+  [{:keys [state call-stack source-scope impl-scope]
+    [{:keys [bind-id bind-from impl? value state-id]} & _] :commands
+    :as ctx}]
+  (let [val-to-bind  (case bind-from
+                       :command-value value
+                       :call-stack (peek call-stack)
+                       :state (get state state-id))
+        val-to-bind  (case val-to-bind
+                       nil ::pt/nil
+                       false ::pt/false
+                       val-to-bind)
+        keyval-pairs (if impl?
+                       [:impl-scope (update impl-scope bind-id #(conj % val-to-bind))]
+                       [:source-scope (update source-scope bind-id #(conj % val-to-bind))])]
+    (default-update ctx keyval-pairs)))
 
 (defn process-unbind-name
-  [{:keys [fn-idx] :as ctx}]
-  (let [fctx (get-in ctx [:fn-stack fn-idx])
-        {:keys [source-scope impl-scope] [{:keys [bind-id impl?]} & _] :commands} fctx]
-    (update-in ctx [:fn-stack fn-idx]
-               #(next-command
-                 (if impl?
-                   (assoc % :impl-scope (update impl-scope bind-id pop))
-                   (assoc % :source-scope (update source-scope bind-id pop)))))))
+  [{:keys [source-scope impl-scope]
+    [{:keys [bind-id impl?]} & _] :commands
+    :as ctx}]
+  (let [keyvals (if impl?
+                  [:impl-scope (update impl-scope bind-id pop)]
+                  [:source-scope (update source-scope bind-id pop)])]
+    (default-update ctx keyvals)))
+
+;; ----------------------------------------------------------------------------------------
+
+(defn keyvals-for-exec
+  [{:keys [command-history]
+    [cmd & cmds] :commands
+    :as _ctx}]
+  [:commands cmds
+   :command-history (conj command-history cmd)])
+
+(defn keyvals-for-skip
+  [{:keys [command-history]
+    [cmd & cmds] :commands
+    :as _ctx}]
+  [:commands (drop (:count cmd) cmds)
+   :command-history (into (conj command-history cmd)
+                          (take (:count cmd) cmds))])
 
 (defn process-exec-when
-  [{:keys [fn-idx] :as ctx}]
-  (let [fctx (get-in ctx [:fn-stack fn-idx])
-        {:keys [state command-history] [cmd & cmds] :commands} fctx]
-    (update-in ctx [:fn-stack fn-idx]
-               #(if (get state (:state-id cmd))
-                  (assoc %
-                         :commands cmds
-                         :command-history (conj command-history cmd))
-                  (assoc %
-                         :commands (drop (:count cmd) cmds)
-                         :command-history (into (conj command-history cmd)
-                                                (take (:count cmd) cmds)))))))
+  [{:keys [state]
+    [cmd & _] :commands
+    :as ctx}]
+  (let [keyvals (if (get state (:state-id cmd))
+                  (keyvals-for-exec ctx)
+                  (keyvals-for-skip ctx))]
+    (default-update ctx false keyvals)))
 
 (defn process-skip-when
-  [{:keys [fn-idx] :as ctx}]
-  (let [fctx (get-in ctx [:fn-stack fn-idx])
-        {:keys [state command-history] [cmd & cmds] :commands} fctx]
-    (update-in ctx [:fn-stack fn-idx]
-               #(if (get state (:state-id cmd))
-                  (assoc %
-                         :commands (drop (:count cmd) cmds)
-                         :command-history (into (conj command-history cmd)
-                                                (take (:count cmd) cmds)))
-                  (assoc %
-                         :commands cmds
-                         :command-history (conj command-history cmd))))))
+  [{:keys [state]
+    [cmd & _] :commands
+    :as ctx}]
+  (let [keyvals (if (get state (:state-id cmd))
+                  (keyvals-for-skip ctx)
+                  (keyvals-for-exec ctx))]
+    (default-update ctx false keyvals)))
 
 (defn process-replay-commands
-  [{:keys [fn-idx] :as ctx}]
-  (let [fctx (get-in ctx [:fn-stack fn-idx])
-        {:keys [command-history] [{:keys [idx] :as cmd} & cmds] :commands} fctx
-        cmds-to-replay (take-while (fn [old-cmd]
+  [{:keys [command-history]
+    [{:keys [idx] :as cmd} & cmds] :commands
+    :as ctx}]
+  (let [cmds-to-replay (take-while (fn [old-cmd]
                                      (not (and (= :recur-target (:cmd old-cmd))
                                                (= idx (:idx old-cmd)))))
                                    command-history)]
-    (update-in ctx [:fn-stack fn-idx]
-               #(assoc %
-                       :commands (concat (reverse cmds-to-replay) [cmd] cmds)
-                       :command-history (drop (count cmds-to-replay) command-history)))))
+    (default-update ctx false
+                    [:commands (concat (reverse cmds-to-replay) [cmd] cmds)
+                     :command-history (drop (count cmds-to-replay) command-history)])))
+
+;; ----------------------------------------------------------------------------------------
 
 (defn process-setup-try
   [{:keys [fn-idx try-handlers] :as ctx}]
@@ -466,7 +494,24 @@
            (conj try-handlers
                  ;; TODO: need an ID for the specific (try) block
                  (merge (select-keys ctx [:fn-idx])
-                        (select-keys cmd [:catches :finally]))))))
+                        (select-keys cmd [:id :catches :finally]))))))
+
+;; ----------------------------------------------------------------------------------------
+
+(defn wrap-throwing
+  [handler]
+  (fn [ctx]
+    (if (:throwing? ctx)
+      (process-no-op ctx)
+      (handler ctx))))
+
+(defn wrap-convenience-mappings
+  [handler]
+  (fn [{:keys [fn-idx] :as ctx}]
+    (let [fctx (get-in ctx [:fn-stack fn-idx])]
+      (apply dissoc
+             (handler (merge ctx fctx))
+             (keys fctx)))))
 
 (defn wrap-uncaught-ex
   [handler]
@@ -474,26 +519,52 @@
     (try
       (handler ctx)
       (catch Exception e
-        (throw (ex-info "Uncaught interpreter exception" ctx e))))))
+        (throw (ex-info "Uncaught interpreter exception" {:ctx ctx} e))))))
+
+(defn wrap-command-middleware
+  ([handler]
+   (wrap-command-middleware handler false))
+  ([handler wrap-throwing?]
+   (cond-> handler
+     wrap-throwing? wrap-throwing
+     true           wrap-convenience-mappings
+     true           wrap-uncaught-ex)))
+
+(defn inject-command-middleware
+  [all-handlers]
+  (reduce (fn [m k]
+            (update m k wrap-command-middleware))
+          all-handlers
+          (keys all-handlers)))
+
+"TODO: When 'throwing?' -- we only care about:
+ ** unbind-name
+ ** cleanup-try
+ 
+ Alternate between processing the two so that intermediate (finally)
+ forms and catch/re-throws are scoped correctly as you work your way
+ back up the fn call stack."
 
 (def command-handlers
-  {:begin-form      (wrap-uncaught-ex process-no-op)
-   :end-form        (wrap-uncaught-ex process-no-op)
-   :invoke-fn       (wrap-uncaught-ex process-invoke-fn)
-   :invoke-throw    (wrap-uncaught-ex process-invoke-throw)
-   :scalar          (wrap-uncaught-ex process-scalar)
-   :capture-state   (wrap-uncaught-ex process-capture-state)
-   :bind-name       (wrap-uncaught-ex process-bind-name)
-   :unbind-name     (wrap-uncaught-ex process-unbind-name)
-   :exec-when       (wrap-uncaught-ex process-exec-when)
-   :skip-when       (wrap-uncaught-ex process-skip-when)
-   :replay-commands (wrap-uncaught-ex process-replay-commands)
-   :setup-try       (wrap-uncaught-ex process-setup-try)
-   ;; --------------------------------------------------------------------------
-   :intern-var      (wrap-uncaught-ex process-no-op) ;; TODO: fix
-   :recur-target    (wrap-uncaught-ex process-no-op) ;; TODO: fix
-   ;; --------------------------------------------------------------------------
-   :not-implemented (wrap-uncaught-ex process-scalar)})
+  (inject-command-middleware
+   {:begin-form      process-no-op
+    :end-form        process-no-op
+    :invoke-fn       process-invoke-fn
+    :invoke-throw    process-invoke-throw
+    :scalar          process-scalar
+    :capture-state   process-capture-state
+    :bind-name       process-bind-name
+    :unbind-name     process-unbind-name
+    :exec-when       process-exec-when
+    :skip-when       process-skip-when
+    :replay-commands process-replay-commands
+    :setup-try       process-setup-try
+    :cleanup-try     process-no-op
+    ;; --------------------------------------------------------------------------
+    :intern-var      process-no-op ;; TODO: fix
+    :recur-target    process-no-op ;; TODO: fix
+    ;; --------------------------------------------------------------------------
+    :not-implemented process-scalar}))
 
 (defn new-fn-ctx
   [commands]
@@ -509,7 +580,8 @@
   {:fn-idx 0
    :fn-stack [(new-fn-ctx commands)]
    :try-handlers (list)
-   :throwing? false})
+   :throwing? false
+   :enable-try-catch-support? false})
 
 (defn execute
   [commands]
