@@ -212,9 +212,11 @@
 (defn finally->cmds
   [{:keys [form->commands in-macro-impl?] :as attrs} body]
   (let [form->commands (partial form->commands attrs)]
-    (concat [{:cmd :begin-form :type :special :op 'finally :impl? in-macro-impl?}]
+    (concat [{:cmd :begin-form :type :special :op 'finally :impl? in-macro-impl?}
+             {:cmd :set-context :props {:is-finally? true}}]
             (mapcat form->commands body)
-            [{:cmd :end-form :type :special :op 'finally :impl? in-macro-impl?}])))
+            [{:cmd :set-context :props {:is-finally? false}}
+             {:cmd :end-form :type :special :op 'finally :impl? in-macro-impl?}])))
 
 (defn code-form?
   [form sym]
@@ -245,6 +247,10 @@
               :catches (mapv (fn [[op clazz-sym ex-sym & body]]
                                (assert (= op 'catch)
                                        "Only catch statements allowed here")
+                               ;; TODO: consolidate where symbol resolution occurs so that
+                               ;;       commands can remain serializable.
+                               ;; TODO: instead of 'resolve, use 'ns-resolve and pass in the
+                               ;;       ns-sym from the context.
                                (hash-map :ex-class (resolve clazz-sym)
                                          :commands (catch->cmds attrs ex-sym body)))
                              catches)
@@ -290,23 +296,26 @@
         (lazy-seq (h attrs form))
         (seq [{:cmd :not-implemented :form form}])))))
 
+(defn new-form-ctx
+  []
+  {:form->commands form->commands
+   :argdef-stack (list)
+   :recur-idx 0
+   :in-macro-impl? false})
+
 (defn create-commands
   ([form]
-   (form->commands {:form->commands form->commands
-                    :argdef-stack (list)
-                    :recur-idx 0
-                    :in-macro-impl? false
-                    :enable-cmd-gen? true}
-                   form))
+   (create-commands form nil))
   ([form args]
-   (assert (vector? args) "args must be a vector")
-   (form->commands {:form->commands form->commands
-                    :argdef-stack (list)
-                    :recur-idx 0
-                    :in-macro-impl? false
-                    :enable-cmd-gen? false
-                    :args args}
-                   form)))
+   (create-commands form args (ns-name *ns*)))
+  ([form args ns-sym]
+   (assert (or (nil? args) (vector? args)) "args must be a vector or nil")
+   (assert (symbol? ns-sym) "ns-sym must be a symbol")
+   (let [attrs (cond-> (new-form-ctx)
+                 true (assoc :ns-sym ns-sym)
+                 true (assoc :enable-cmd-gen? (not (boolean args)))
+                 args (assoc :args args))]
+     (form->commands attrs form))))
 
 ;; ----------------------------------------------------------------------------------------
 
@@ -341,11 +350,6 @@
      consume-command? next-command
      true (update-fn-ctx (apply with-keyvals kvs)))))
 
-(defn ctx-find-catch
-  ;; TODO: need an implementation here
-  []
-  ())
-
 (def temp-ctx {::pt/current-ns *ns*})
 
 ;; ----------------------------------------------------------------------------------------
@@ -355,7 +359,7 @@
   (next-command ctx))
 
 (defn process-invoke-fn
-  [{:keys [enable-try-catch-support? call-stack]
+  [{:keys [enable-try-catch-support? is-throwing? is-finally? call-stack]
     [cmd & _] :commands
     :as ctx}]
   (let [arg-count (:arg-count cmd)
@@ -378,18 +382,20 @@
                          (take arg-count call-stack))]
     (when (and ex? (not enable-try-catch-support?))
       (throw result))
-    (-> ctx
-        (assoc :throwing? ex?)
-        (default-update
-         [:call-stack (conj (apply list (drop arg-count call-stack))
-                            result)]))))
+    (let [set-throwing? (boolean (or is-throwing? ex?))]
+      (-> ctx
+          (assoc :is-throwing? set-throwing?)
+          (assoc :is-finally? (if set-throwing? false is-finally?))
+          (default-update
+           [:call-stack (conj (apply list (drop arg-count call-stack))
+                              result)])))))
 
 (defn process-invoke-throw
-  [{:keys [call-stack]
-    [_cmd & _] :commands
-    :as _ctx}]
-  ;; TODO: don't actually throw, resolve the ctx against the stack and try-handlers
-  (throw (first call-stack)))
+  [{:keys [enable-try-catch-support? call-stack]
+    :as ctx}]
+  (when-not enable-try-catch-support?
+    (throw (peek call-stack)))
+  (assoc ctx :is-throwing? true :is-finally? false))
 
 (defn process-scalar
   [{:keys [call-stack source-scope impl-scope]
@@ -488,23 +494,45 @@
 
 ;; ----------------------------------------------------------------------------------------
 
+(defn find-catch
+  [e catches]
+  (->> catches
+       (filter (fn [{:keys [ex-class]}] (instance? ex-class e)))
+       (first)
+       :commands))
+
 (defn process-setup-try
-  [{:keys [fn-idx try-handlers] :as ctx}]
-  (let [{[cmd] :commands :as _fctx} (get-in ctx [:fn-stack fn-idx])]
-    (assoc ctx :try-handlers
-           (conj try-handlers
-                 ;; TODO: need an ID for the specific (try) block
-                 (merge (select-keys ctx [:fn-idx])
-                        (select-keys cmd [:id :catches :finally]))))))
+  [{:keys [try-handlers]
+    [cmd] :commands
+    :as ctx}]
+  (-> ctx
+      next-command
+      (assoc :try-handlers
+             (conj try-handlers
+                   (merge (select-keys ctx [:fn-idx])
+                          (select-keys cmd [:id :catches :finally]))))))
+
+(defn process-cleanup-try
+  [{:keys [call-stack try-handlers]
+    [_ & cmds] :commands
+    :as ctx}]
+  (let [{:keys [catches] finally-commands :finally} (peek try-handlers)
+        catch-commands (find-catch (peek call-stack) catches)]
+    (-> ctx
+        (assoc :is-throwing? (not (boolean catch-commands)))
+        (default-update [:commands (concat catch-commands finally-commands cmds)]))))
 
 ;; ----------------------------------------------------------------------------------------
 
 (defn wrap-throwing
   [handler]
-  (fn [ctx]
-    (if (:throwing? ctx)
-      (process-no-op ctx)
-      (handler ctx))))
+  (let [cleanup-op? #{:unbind-name :cleanup-try}]
+    (fn [{:keys [is-throwing? is-finally?] [{:keys [cmd]}] :commands :as ctx}]
+      (if (and is-throwing?
+               (not is-finally?)
+               (not (cleanup-op? cmd)))
+        (process-no-op ctx)
+        (handler ctx)))))
 
 (defn wrap-check-not-infinite
   [handler]
@@ -538,8 +566,8 @@
 
 (defn wrap-command-middleware
   ([handler]
-   (wrap-command-middleware handler false))
-  ([handler wrap-throwing?]
+   (wrap-command-middleware false handler))
+  ([wrap-throwing? handler]
    (cond-> handler
      wrap-throwing? wrap-throwing
      true           wrap-check-not-infinite
@@ -547,11 +575,16 @@
      true           wrap-uncaught-ex)))
 
 (defn inject-command-middleware
-  [all-handlers]
+  [{:keys [wrap-throwing?] :as _opts} all-handlers]
   (reduce (fn [m k]
-            (update m k wrap-command-middleware))
+            (update m k (partial wrap-command-middleware
+                                 wrap-throwing?)))
           all-handlers
           (keys all-handlers)))
+
+;; ----------------------------------------------------------------------------------------
+
+(def ^:dynamic *enable-try-catch-support* false)
 
 "TODO: When 'throwing?' -- we only care about:
  ** unbind-name
@@ -561,13 +594,21 @@
  forms and catch/re-throws are scoped correctly as you work your way
  back up the fn call stack."
 
+(defn process-set-context
+  [ctx]
+  (let [props (:props (first (:commands ctx)))
+        ctx*  (apply assoc ctx (apply concat (seq props)))]
+    (next-command ctx*)))
+
 (defn process-test-hook
   [ctx]
   (let [f (:hook-fn (first (:commands ctx)))]
     (f ctx)))
 
-(def command-handlers
+(defn create-command-handlers
+  []
   (inject-command-middleware
+   {:wrap-throwing? *enable-try-catch-support*}
    {:begin-form      process-no-op
     :end-form        process-no-op
     :invoke-fn       process-invoke-fn
@@ -580,11 +621,12 @@
     :skip-when       process-skip-when
     :replay-commands process-replay-commands
     :setup-try       process-setup-try
-    :cleanup-try     process-no-op
+    :cleanup-try     process-cleanup-try
     ;; --------------------------------------------------------------------------
     :intern-var      process-no-op ;; TODO: fix
     :recur-target    process-no-op ;; TODO: fix
     ;; --------------------------------------------------------------------------
+    :set-context     process-set-context
     :test-hook       process-test-hook
     :not-implemented process-scalar}))
 
@@ -593,7 +635,7 @@
   (let [f (fn [{:keys [fn-idx] :as ctx}]
             (-> ctx
                 next-command
-                (assoc-in [:fn-stack fn-idx :throwing?] true)))
+                (assoc-in [:fn-stack fn-idx :is-throwing?] true)))
         test-hook {:cmd :test-hook :hook-fn f}
         cmds (create-commands '(+ 1 1))
         cmds* (concat (butlast cmds)
@@ -614,32 +656,35 @@
   {:fn-idx 0
    :fn-stack [(new-fn-ctx commands)]
    :try-handlers (list)
-   :throwing? false
-   :enable-try-catch-support? false})
+   :is-throwing? false
+   :is-finally? false
+   :enable-try-catch-support? *enable-try-catch-support*})
 
 (defn execute
   [commands]
-  (loop [{:keys [fn-idx] :as ctx} (new-exec-ctx commands)]
-    (let [{:keys [commands call-stack] :as fctx} (get-in ctx [:fn-stack fn-idx])
-          h (get command-handlers (:cmd (first commands)))]
-      (if h
-        (recur (h ctx))
-        (first call-stack)))))
+  (let [command-handlers (create-command-handlers)]
+    (loop [{:keys [fn-idx] :as ctx} (new-exec-ctx commands)]
+      (let [{:keys [commands call-stack] :as fctx} (get-in ctx [:fn-stack fn-idx])
+            h (get command-handlers (:cmd (first commands)))]
+        (if h
+          (recur (h ctx))
+          (first call-stack))))))
 
 (defn ctx-seq
   [input]
-  (cond
-    (seq? input)
-    (ctx-seq (new-exec-ctx input))
-    (map? input)
-    (cons input (lazy-seq
-                 (let [fctx (get-in input [:fn-stack (:fn-idx input)])
-                       h (get command-handlers
-                              (:cmd (first (:commands fctx))))]
-                   (when h
-                     (ctx-seq (h input))))))
-    :else
-    (throw (IllegalArgumentException. "Input must be seq or map"))))
+  (let [command-handlers (create-command-handlers)]
+    (cond
+      (seq? input)
+      (ctx-seq (new-exec-ctx input))
+      (map? input)
+      (cons input (lazy-seq
+                   (let [fctx (get-in input [:fn-stack (:fn-idx input)])
+                         h (get command-handlers
+                                (:cmd (first (:commands fctx))))]
+                     (when h
+                       (ctx-seq (h input))))))
+      :else
+      (throw (IllegalArgumentException. "Input must be seq or map")))))
 
 ;; ----------------------------------------------------------------------------------------
 
@@ -663,9 +708,9 @@
                 (create-commands form))]
      (->> cmds
           (ctx-seq)
-          (map (fn [{:keys [fn-idx throwing?] :as ctx}]
+          (map (fn [{:keys [fn-idx is-throwing?] :as ctx}]
                  (-> (get-in ctx [:fn-stack fn-idx])
-                     (assoc :throwing? throwing?))))
+                     (assoc :is-throwing? is-throwing?))))
           (map (fn [{:keys [commands] :as ctx}]
                  (-> ctx
                      (assoc :next-command (first commands))
