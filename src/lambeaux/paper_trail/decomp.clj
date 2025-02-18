@@ -1,6 +1,7 @@
 (ns lambeaux.paper-trail.decomp
   (:require [lambeaux.paper-trail.core :as core]
             [lambeaux.paper-trail.seq :as pts]
+            [clojure.set :as set]
             [paper.trail :as-alias pt])
   (:import [clojure.lang IObj Cons]))
 
@@ -509,6 +510,9 @@
   [handler]
   (fn [{:keys [fn-idx] :as ctx}]
     (let [fctx (get-in ctx [:fn-stack fn-idx])]
+      (assert (empty? (set/intersection (into #{} (keys ctx))
+                                        (into #{} (keys fctx))))
+              "There must be no key overlap between ctx and fctx")
       (apply dissoc
              (handler (merge ctx fctx))
              (keys fctx)))))
@@ -545,6 +549,11 @@
  forms and catch/re-throws are scoped correctly as you work your way
  back up the fn call stack."
 
+(defn process-test-hook
+  [ctx]
+  (let [f (:hook-fn (first (:commands ctx)))]
+    (f ctx)))
+
 (def command-handlers
   (inject-command-middleware
    {:begin-form      process-no-op
@@ -564,7 +573,20 @@
     :intern-var      process-no-op ;; TODO: fix
     :recur-target    process-no-op ;; TODO: fix
     ;; --------------------------------------------------------------------------
+    :test-hook       process-test-hook
     :not-implemented process-scalar}))
+
+(comment
+  "Example use case for test hook: "
+  (let [f (fn [{:keys [fn-idx] :as ctx}]
+            (-> ctx
+                next-command
+                (assoc-in [:fn-stack fn-idx :throwing?] true)))
+        test-hook {:cmd :test-hook :hook-fn f}
+        cmds (create-commands '(+ 1 1))
+        cmds* (concat (butlast cmds)
+                      [test-hook (last cmds)])]
+    (execute cmds*)))
 
 (defn new-fn-ctx
   [commands]
