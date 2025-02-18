@@ -506,6 +506,17 @@
       (process-no-op ctx)
       (handler ctx))))
 
+(defn wrap-check-not-infinite
+  [handler]
+  (fn [{:keys [fn-idx] :as ctx}]
+    (let [ctx* (handler ctx)
+          pre-handler-cmds (get-in ctx [:fn-stack fn-idx :commands])
+          post-handler-cmds (get-in ctx* [:fn-stack fn-idx :commands])]
+      (if-not (= pre-handler-cmds post-handler-cmds)
+        ctx*
+        (throw (new AssertionError
+                    "Infinite processing error detected: handler did not update commands"))))))
+
 (defn wrap-convenience-mappings
   [handler]
   (fn [{:keys [fn-idx] :as ctx}]
@@ -531,6 +542,7 @@
   ([handler wrap-throwing?]
    (cond-> handler
      wrap-throwing? wrap-throwing
+     true           wrap-check-not-infinite
      true           wrap-convenience-mappings
      true           wrap-uncaught-ex)))
 
