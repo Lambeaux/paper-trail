@@ -254,6 +254,10 @@
   (eval '(. "hi" contains "hi"))      "Use eval, not ideal, produces undesireable overhead"
   ((memfn contains substr) "hi" "hi") "Use memfn, great, but shifts problem to fn handling"
 
+  "We probably need type hinting for the memfn approach: "
+  (let [f (memfn ^Boolean contains ^String substr)]
+    (f "hi" "h"))
+
   "What if, for fn handling, we create our own defrecord that implements all interfaces?"
   (let [f (fn [i] (inc i))] (all-interfaces f))
 
