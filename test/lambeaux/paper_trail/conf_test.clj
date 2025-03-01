@@ -1,7 +1,8 @@
 (ns lambeaux.paper-trail.conf-test
   "Conformance tests for the interpreter."
   (:require [clojure.test :as t :refer [deftest testing is]]
-            [lambeaux.paper-trail.decomp :as ptd])
+            [lambeaux.paper-trail.decomp :as ptd]
+            [paper.trail :as-alias pt])
   (:import  [clojure.lang ExceptionInfo]))
 
 (defn throwable?
@@ -40,12 +41,22 @@
        (ex= y (first more)))
      false)))
 
-(defmacro return-ex
+(deftype TestResult [result]
+  Object
+  (equals [this other]
+    (ex= (.result this) (.result other)))
+  (hashCode [this]
+    (.hashCode (.result this))))
+
+(defmacro capture-result
   [& body]
   (let [ex-sym (gensym "ex-")]
     `(try
-       ~@body
-       (catch Exception ~ex-sym ~ex-sym))))
+       {::pt/uncaught? false
+        ::pt/result    (TestResult. (do ~@body))}
+       (catch Exception ~ex-sym
+         {::pt/uncaught? true
+          ::pt/result    (TestResult. ~ex-sym)}))))
 
 (defmacro forms->test
   [msg & forms]
@@ -59,8 +70,8 @@
                   ;; if any atoms or other state are not local to
                   ;; the form, the test results might be skewed.
                   `(testing (str '~form)
-                     (is (ex= (return-ex (eval '~form))
-                              (return-ex (ptd/run-eval '~form))))))
+                     (is (= (capture-result (eval '~form))
+                            (capture-result (ptd/run-eval '~form))))))
                 forms))))
 
 (deftest ^:minimal test-core-fns
