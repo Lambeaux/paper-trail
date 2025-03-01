@@ -1,7 +1,51 @@
 (ns lambeaux.paper-trail.conf-test
   "Conformance tests for the interpreter."
   (:require [clojure.test :as t :refer [deftest testing is]]
-            [lambeaux.paper-trail.decomp :as ptd]))
+            [lambeaux.paper-trail.decomp :as ptd])
+  (:import  [clojure.lang ExceptionInfo]))
+
+(defn throwable?
+  [obj]
+  (instance? Throwable obj))
+
+(defn ex-info?
+  [obj]
+  (instance? ExceptionInfo obj))
+
+(defn ex-comparable*
+  [e]
+  (when e
+    {:clazz   (class e)
+     :message (ex-message e)
+     :data    (ex-data e)
+     ;; todo: can only recur from tail position
+     ;; not a big deal but possibly revisit later
+     :cause   (ex-comparable* (ex-cause e))}))
+
+(defn ex=
+  "Extend Clojure equality to include throwables. Not comprehensive, but
+   sufficient enough for our testing purposes."
+  ([_x] true)
+  ([x y]
+   (if-not (throwable? x)
+     (= x y)
+     (if-not (throwable? y)
+       false
+       (= (ex-comparable* x)
+          (ex-comparable* y)))))
+  ([x y & more]
+   (if (ex= x y)
+     (if (next more)
+       (recur y (first more) (next more))
+       (ex= y (first more)))
+     false)))
+
+(defmacro return-ex
+  [& body]
+  (let [ex-sym (gensym "ex-")]
+    `(try
+       ~@body
+       (catch Exception ~ex-sym ~ex-sym))))
 
 (defmacro forms->test
   [msg & forms]
@@ -15,8 +59,8 @@
                   ;; if any atoms or other state are not local to
                   ;; the form, the test results might be skewed.
                   `(testing (str '~form)
-                     (is (= (eval '~form)
-                            (ptd/run-eval '~form)))))
+                     (is (ex= (return-ex (eval '~form))
+                              (return-ex (ptd/run-eval '~form))))))
                 forms))))
 
 (deftest ^:minimal test-core-fns
