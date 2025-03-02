@@ -14,49 +14,65 @@
   (instance? ExceptionInfo obj))
 
 (defn ex-comparable*
-  [e]
-  (when e
-    {:clazz   (class e)
-     :message (ex-message e)
-     :data    (ex-data e)
+  [obj]
+  (when obj
+    {:type    ::pt/ex-comparable
+     :clazz   (class obj)
+     :message (ex-message obj)
+     :data    (ex-data obj)
      ;; todo: can only recur from tail position
      ;; not a big deal but possibly revisit later
-     :cause   (ex-comparable* (ex-cause e))}))
+     :cause   (ex-comparable* (ex-cause obj))}))
 
-(defn ex=
-  "Extend Clojure equality to include throwables. Not comprehensive, but
-   sufficient enough for our testing purposes."
-  ([_x] true)
-  ([x y]
-   (if-not (throwable? x)
-     (= x y)
-     (if-not (throwable? y)
-       false
-       (= (ex-comparable* x)
-          (ex-comparable* y)))))
-  ([x y & more]
-   (if (ex= x y)
-     (if (next more)
-       (recur y (first more) (next more))
-       (ex= y (first more)))
-     false)))
+(defn ex-comparable
+  [obj]
+  (if-not (throwable? obj)
+    obj
+    (ex-comparable* obj)))
 
-(deftype TestResult [result]
-  Object
-  (equals [this other]
-    (ex= (.result this) (.result other)))
-  (hashCode [this]
-    (.hashCode (.result this))))
+(comment
+
+  "Keeping this code around just temporarily, can probably remove it
+   if I don't ever need to compare nested data that contain throwables."
+
+  (defn ex=
+    "Extend Clojure equality to include throwables. Not comprehensive, but
+     sufficient enough for our testing purposes."
+    ([_x] true)
+    ([x y]
+     (if-not (throwable? x)
+       (= x y)
+       (if-not (throwable? y)
+         false
+         (= (ex-comparable* x)
+            (ex-comparable* y)))))
+    ([x y & more]
+     (if (ex= x y)
+       (if (next more)
+         (recur y (first more) (next more))
+         (ex= y (first more)))
+       false)))
+
+  (deftype TestResult [result]
+    Object
+    (equals [this other]
+      (ex= (.result this) (.result other)))
+    (hashCode [this]
+      (.hashCode (.result this)))))
 
 (defmacro capture-result
   [& body]
   (let [ex-sym (gensym "ex-")]
     `(try
        {::pt/uncaught? false
-        ::pt/result    (TestResult. (do ~@body))}
+        ::pt/result    (do ~@body)}
        (catch Exception ~ex-sym
          {::pt/uncaught? true
-          ::pt/result    (TestResult. ~ex-sym)}))))
+          ::pt/result    ~ex-sym}))))
+
+(defn wrap*
+  [pt-result]
+  (update pt-result ::pt/result ex-comparable))
 
 (defmacro forms->test
   [msg & forms]
@@ -70,9 +86,25 @@
                   ;; if any atoms or other state are not local to
                   ;; the form, the test results might be skewed.
                   `(testing (str '~form)
-                     (is (= (capture-result (eval '~form))
-                            (capture-result (ptd/run-eval '~form))))))
+                     (is (= (wrap* (capture-result (eval '~form)))
+                            (wrap* (capture-result (ptd/run-eval '~form)))))))
                 forms))))
+
+(defn compare-eval*
+  [& forms]
+  (let [handlers [`eval `ptd/run-eval]
+        test-cases (for [handler-sym handlers form forms]
+                     {:handler handler-sym :input form})]
+    (mapv (fn [{:keys [handler input] :as tcase}]
+            (let [h (deref (resolve handler))
+                  outcome (capture-result (h input))]
+              (assoc tcase :outcome (update outcome ::pt/result ex-comparable))))
+          test-cases)))
+
+(comment
+  "How do use compare-eval to investigate conformance test failures: "
+  (compare-eval* '(try (into [] (map inc ["a" "b" "c"]))))
+  (apply = (map :outcome *1)))
 
 (deftest ^:minimal test-core-fns
   (forms->test "Test basic core functions"
@@ -159,6 +191,30 @@
             (vector x y)
             (recur (inc y))))
         (recur (inc x))))))
+
+;; todo: revisit once you finish implementing interop
+;; '(try (throw (IllegalArgumentException. "Hi")))
+(deftest ^:special test-try-catch-finally
+  (testing "Test (try) standalone"
+    (testing "when nothing gets thrown"
+      (forms->test "using basic values"
+        (try (+ 1 1))
+        (try (into [] (map inc [1 2 3]))))
+      (forms->test "using basic values in a nested try"
+        (try (try (+ 1 1)))
+        (try (into [] (try (map inc [1 2 3]))))))
+    (testing "when exceptions are manually thrown"
+      (forms->test "using basic values"
+        (try (throw (ex-info "Hi" {})))
+        (try (into [] (map inc (throw (ex-info "Hi" {}))))))
+      (forms->test "using basic values in a nested try"
+        (try (try (throw (ex-info "Hi" {}))))
+        (try (into [] (try (map inc (throw (ex-info "Hi" {}))))))))
+    (testing "when exceptions propagate from other fns"
+      (forms->test "using basic values"
+        (try (into [] (map inc ["a" "b" "c"]))))
+      (forms->test "using basic values in a nested try"
+        (try (into [] (try (map inc ["a" "b" "c"]))))))))
 
 (deftest ^:core test-do-side-effects
   (forms->test "Test (do) side effect behavior"

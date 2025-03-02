@@ -271,6 +271,9 @@
             [{:cmd :invoke-throw}
              {:cmd :end-form :type :special :op 'throw :impl? in-macro-impl?}])))
 
+;; todo: need to add support for the following then update test cases:
+;; -- (quote) which needs to turn off evaluation
+;; -- literals like maps {}, vectors [], sets #{}, and quoted lists '()
 (def form-handlers
   {'def             (wrap-check-macro handle-def)
    'do              (wrap-check-macro handle-do)
@@ -364,9 +367,12 @@
     :as ctx}]
   (let [arg-count (:arg-count cmd)
         [ex? result] (try
-                       [false (apply (core/->impl temp-ctx (:op cmd))
-                                     (map (core/map-impl-fn temp-ctx)
-                                          (take arg-count call-stack)))]
+                       ;; TODO: invoking doall here is a hack, need a better way for
+                       ;; handling exception propogation for lazy seqs
+                       (let [return (apply (core/->impl temp-ctx (:op cmd))
+                                           (map (core/map-impl-fn temp-ctx)
+                                                (take arg-count call-stack)))]
+                         [false (if-not (seq? return) return (doall return))])
                        ;; JVM Note: typical applications should not catch throwable
                        ;; if you copy this pattern, make sure you know what you're doing
                        ;; (catch Throwable t [true t])
@@ -395,7 +401,10 @@
     :as ctx}]
   (when-not enable-try-catch-support?
     (throw (peek call-stack)))
-  (assoc ctx :is-throwing? true :is-finally? false))
+  (-> ctx
+      (next-command)
+      (assoc :is-throwing? true)
+      (assoc :is-finally? false)))
 
 (defn process-scalar
   [{:keys [call-stack source-scope impl-scope]
@@ -513,13 +522,13 @@
                           (select-keys cmd [:id :catches :finally]))))))
 
 (defn process-cleanup-try
-  [{:keys [call-stack try-handlers]
+  [{:keys [is-throwing? call-stack try-handlers]
     [_ & cmds] :commands
     :as ctx}]
   (let [{:keys [catches] finally-commands :finally} (peek try-handlers)
         catch-commands (find-catch (peek call-stack) catches)]
     (-> ctx
-        (assoc :is-throwing? (not (boolean catch-commands)))
+        (assoc :is-throwing? (when is-throwing? (not (boolean catch-commands))))
         (default-update [:commands (concat catch-commands finally-commands cmds)]))))
 
 ;; ----------------------------------------------------------------------------------------
@@ -584,7 +593,7 @@
 
 ;; ----------------------------------------------------------------------------------------
 
-(def ^:dynamic *enable-try-catch-support* false)
+(def ^:dynamic *enable-try-catch-support* true)
 
 "TODO: When 'throwing?' -- we only care about:
  ** unbind-name
@@ -663,12 +672,22 @@
 (defn execute
   [commands]
   (let [command-handlers (create-command-handlers)]
-    (loop [{:keys [fn-idx] :as ctx} (new-exec-ctx commands)]
-      (let [{:keys [commands call-stack] :as fctx} (get-in ctx [:fn-stack fn-idx])
+    (loop [{:keys [enable-try-catch-support? is-throwing? fn-idx] :as ctx} (new-exec-ctx commands)]
+      (let [{:keys [commands call-stack] :as _fctx} (get-in ctx [:fn-stack fn-idx])
             h (get command-handlers (:cmd (first commands)))]
         (if h
           (recur (h ctx))
-          (first call-stack))))))
+          (if (and enable-try-catch-support? is-throwing?)
+            ;; todo: when you support drilling down into function calls, fix
+            ;; this to pop fns off the fn-stack and only throw when none remain
+            ;; ---
+            ;; also consider wrapping exceptions we know should be thrown inside
+            ;; ex-info's with attached metadata, then wrap the entire interpreter
+            ;; process with something like wrap-uncaught-ex but forward any wrapped
+            ;; exception accordingly since they don't count as 'interpreter errors'
+            ;; (maybe make a deftype for internal interpreter errors/exceptions)
+            (throw (first call-stack))
+            (first call-stack)))))))
 
 (defn ctx-seq
   [input]
