@@ -3,7 +3,7 @@
             [lambeaux.paper-trail.seq :as pts]
             [clojure.set :as set]
             [paper.trail :as-alias pt])
-  (:import [clojure.lang IObj Cons]))
+  (:import [clojure.lang IObj IPending LazySeq]))
 
 (defn decompose-form
   [form]
@@ -357,6 +357,74 @@
 
 ;; ----------------------------------------------------------------------------------------
 
+;; (defrecord Unrealized [wrapped-value])
+
+(deftype Unrealized [theWrappedVal theValsMetadata]
+  ;; IPending (??)
+  ;; (isRealized [this])
+  IObj
+  (meta [this] (. this theValsMetadata))
+  (withMeta [this m] (new Unrealized (. this theWrappedVal) m)))
+
+(defn val->unrealized
+  [v]
+  (new Unrealized v nil))
+
+(defn unrealized->val
+  [u]
+  (. u theWrappedVal))
+
+(defn realized-val?
+  [val*]
+  (if (instance? Unrealized val*)
+    false
+    (if-not (instance? IPending val*)
+      true
+      (realized? val*))))
+
+(defn stack-unwrap-val
+  [val*]
+  (if-not (instance? Unrealized val*)
+    val*
+    (unrealized->val val*)))
+
+(defn stack-peek
+  [call-stack]
+  (stack-unwrap-val (peek call-stack)))
+
+(defn stack-take
+  [n call-stack]
+  (map stack-unwrap-val (take n call-stack)))
+
+(defn assoc-meta
+  "Like 'assoc' but operates on obj's metadata."
+  ([obj k v]
+   (vary-meta obj assoc k v))
+  ([obj k v k* v*]
+   (vary-meta obj assoc k v k* v*))
+  ([obj k v k* v* & kvs]
+   (let [f #(apply assoc (concat [% k v k* v*] kvs))]
+     (vary-meta obj f))))
+
+(defn stack-eval-result
+  [result]
+  (cond-> result
+    (not (realized-val? result)) (val->unrealized)
+    (instance? IObj result)      (assoc-meta ::pt/is-evaled? true)))
+
+;; ----------------------------------------------------------------------------------------
+
+;; TODO clean up all this messy code that concerns
+;; symbol and namespace resolution
+(defn map-impl-fn [ctx]
+  (fn [arg]
+    (cond 
+      ;; needed this check because lazy ex's were getting
+      ;; swallowed by accessible-fn? and ->impl
+      (instance? LazySeq arg) arg
+      (core/accessible-fn? ctx arg) (core/->impl ctx arg) 
+      :else arg)))
+
 (defn process-no-op
   [ctx]
   (next-command ctx))
@@ -367,25 +435,24 @@
     :as ctx}]
   (let [arg-count (:arg-count cmd)
         [ex? result] (try
-                       ;; TODO: invoking doall here is a hack, need a better way for
-                       ;; handling exception propogation for lazy seqs
                        (let [return (apply (core/->impl temp-ctx (:op cmd))
-                                           (map (core/map-impl-fn temp-ctx)
-                                                (take arg-count call-stack)))]
-                         [false (if-not (seq? return) return (doall return))])
+                                           (map (map-impl-fn temp-ctx)
+                                                (stack-take arg-count call-stack)))]
+                         ;; [false (if-not (seq? return) return (doall return))]
+                         ;; Turns out, requiring doall here was a red herring. The real
+                         ;; failure was occurring down below when trying to with-meta a
+                         ;; lazy, unrealized seq. 
+                         [false return])
                        ;; JVM Note: typical applications should not catch throwable
                        ;; if you copy this pattern, make sure you know what you're doing
                        ;; (catch Throwable t [true t])
                        ;; TODO: eventually support Throwable for more accurate results
                        (catch Exception e [true e]))
-        result (if (instance? IObj result)
-                 (with-meta result {::pt/is-evaled? true})
-                 result)
-        _final-form (map (fn [arg]
-                           (or (and (instance? IObj arg)
-                                    (::pt/raw-form (meta arg)))
-                               arg))
-                         (take arg-count call-stack))]
+        #_#_final-form (map (fn [arg]
+                              (or (and (instance? IObj arg)
+                                       (::pt/raw-form (meta arg)))
+                                  arg))
+                            (stack-take arg-count call-stack))]
     (when (and ex? (not enable-try-catch-support?))
       (throw result))
     (let [set-throwing? (boolean (or is-throwing? ex?))]
@@ -394,13 +461,13 @@
           (assoc :is-finally? (if set-throwing? false is-finally?))
           (default-update
            [:call-stack (conj (apply list (drop arg-count call-stack))
-                              result)])))))
+                              (stack-eval-result result))])))))
 
 (defn process-invoke-throw
   [{:keys [enable-try-catch-support? call-stack]
     :as ctx}]
   (when-not enable-try-catch-support?
-    (throw (peek call-stack)))
+    (throw (stack-peek call-stack)))
   (-> ctx
       (next-command)
       (assoc :is-throwing? true)
@@ -418,7 +485,7 @@
                        ::pt/nil nil
                        ::pt/false false
                        scalar-value)]
-    (default-update ctx [:call-stack (conj call-stack scalar-value)])))
+    (default-update ctx [:call-stack (conj call-stack (stack-eval-result scalar-value))])))
 
 ;; ----------------------------------------------------------------------------------------
 
@@ -426,7 +493,7 @@
   [{:keys [call-stack state]
     [cmd & _] :commands
     :as ctx}]
-  (default-update ctx [:state (assoc state (:state-id cmd) (peek call-stack))]))
+  (default-update ctx [:state (assoc state (:state-id cmd) (stack-peek call-stack))]))
 
 (defn process-bind-name
   [{:keys [state call-stack source-scope impl-scope]
@@ -434,7 +501,7 @@
     :as ctx}]
   (let [val-to-bind  (case bind-from
                        :command-value value
-                       :call-stack (peek call-stack)
+                       :call-stack (stack-peek call-stack)
                        :state (get state state-id))
         val-to-bind  (case val-to-bind
                        nil ::pt/nil
@@ -526,7 +593,7 @@
     [_ & cmds] :commands
     :as ctx}]
   (let [{:keys [catches] finally-commands :finally} (peek try-handlers)
-        catch-commands (find-catch (peek call-stack) catches)]
+        catch-commands (find-catch (stack-peek call-stack) catches)]
     (-> ctx
         (assoc :is-throwing? (when is-throwing? (not (boolean catch-commands))))
         (default-update [:commands (concat catch-commands finally-commands cmds)]))))
@@ -686,8 +753,35 @@
             ;; process with something like wrap-uncaught-ex but forward any wrapped
             ;; exception accordingly since they don't count as 'interpreter errors'
             ;; (maybe make a deftype for internal interpreter errors/exceptions)
-            (throw (first call-stack))
-            (first call-stack)))))))
+            (throw (stack-peek call-stack))
+            (stack-peek call-stack)))))))
+
+(defn get-fctx
+  [context]
+  (get-in context [:fn-stack (:fn-idx context)]))
+
+(defn execute-seq
+  [handlers context]
+  (cons context
+        (lazy-seq
+         (let [fctx (get-fctx context)
+               h (get handlers (:cmd (first (:commands fctx))))]
+           (when h
+             (execute-seq handlers (h context)))))))
+
+(defn execute-lazy
+  [commands]
+  (let [command-handlers (create-command-handlers)
+        initial-ctx (new-exec-ctx commands)
+        seq* (execute-seq command-handlers initial-ctx)
+        final-ctx (last seq*)
+        {:keys [enable-try-catch-support? is-throwing?]} final-ctx
+        call-stack (:call-stack (get-fctx final-ctx))]
+    (if (and enable-try-catch-support? is-throwing?)
+            ;; SEE ABOVE TODO ITEM
+      (throw (stack-peek call-stack))
+      (stack-peek call-stack))
+    seq*))
 
 (defn ctx-seq
   [input]
