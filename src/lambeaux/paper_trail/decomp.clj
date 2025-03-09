@@ -366,6 +366,11 @@
   (meta [this] (. this theValsMetadata))
   (withMeta [this m] (new Unrealized (. this theWrappedVal) m)))
 
+(defmethod print-method Unrealized
+  [this writer]
+  (let [class-str (.getName (class (. this theWrappedVal)))]
+    (.write writer (str "#unrealized[" class-str "]"))))
+
 (defn val->unrealized
   [v]
   (new Unrealized v nil))
@@ -418,11 +423,11 @@
 ;; symbol and namespace resolution
 (defn map-impl-fn [ctx]
   (fn [arg]
-    (cond 
+    (cond
       ;; needed this check because lazy ex's were getting
       ;; swallowed by accessible-fn? and ->impl
       (instance? LazySeq arg) arg
-      (core/accessible-fn? ctx arg) (core/->impl ctx arg) 
+      (core/accessible-fn? ctx arg) (core/->impl ctx arg)
       :else arg)))
 
 (defn process-no-op
