@@ -3,7 +3,23 @@
   (:require [clojure.test :as t :refer [deftest testing is]]
             [lambeaux.paper-trail.decomp :as ptd]
             [paper.trail :as-alias pt])
-  (:import  [clojure.lang ExceptionInfo]))
+  (:import  [clojure.lang ExceptionInfo]
+            [java.io IOException]))
+
+;; runtime ex
+(defn new-illegal-arg-ex
+  ([msg] (IllegalArgumentException. msg))
+  ([msg cause] (IllegalArgumentException. msg cause)))
+
+;; runtime ex
+(defn new-illegal-state-ex
+  ([msg] (IllegalStateException. msg))
+  ([msg cause] (IllegalStateException. msg cause)))
+
+;; NOT runtime ex
+(defn new-io-ex
+  ([msg] (IOException. msg))
+  ([msg cause] (IOException. msg cause)))
 
 (defn throwable?
   [obj]
@@ -195,7 +211,9 @@
 ;; todo: revisit once you finish implementing interop
 ;; '(try (throw (IllegalArgumentException. "Hi")))
 (deftest ^:special test-try-catch-finally
+  ;; ---------------------------------------------------------------------------
   (testing "Test (try) standalone"
+    ;; ---------------------------------------------------------------------------
     (testing "when nothing gets thrown"
       (forms->test "using basic values"
         (try (+ 1 1))
@@ -203,6 +221,7 @@
       (forms->test "using basic values in a nested try"
         (try (try (+ 1 1)))
         (try (into [] (try (map inc [1 2 3]))))))
+    ;; ---------------------------------------------------------------------------
     (testing "when exceptions are manually thrown"
       (forms->test "using basic values"
         (try (throw (ex-info "Hi" {})))
@@ -210,11 +229,130 @@
       (forms->test "using basic values in a nested try"
         (try (try (throw (ex-info "Hi" {}))))
         (try (into [] (try (map inc (throw (ex-info "Hi" {}))))))))
+    ;; ---------------------------------------------------------------------------
     (testing "when exceptions propagate from other fns"
       (forms->test "using basic values"
         (try (into [] (map inc ["a" "b" "c"]))))
       (forms->test "using basic values in a nested try"
-        (try (into [] (try (map inc ["a" "b" "c"]))))))))
+        (try (into [] (try (map inc ["a" "b" "c"])))))))
+  ;; ---------------------------------------------------------------------------
+  (testing "Test (try) with (catch)"
+    ;; ---------------------------------------------------------------------------
+    (testing "when nothing gets thrown"
+      (forms->test "using basic values"
+        (try (+ 1 1)
+             (catch Exception _e :error))
+        (try (into [] (map inc [1 2 3]))
+             (catch Exception _e :error)))
+      (forms->test "using basic values in a nested try"
+        (try (try (+ 1 1)
+                  (catch Exception _ey :inner-error))
+             (catch Exception _ex :outer-error))
+        (try (into [] (try (map inc [1 2 3])
+                           (catch Exception _ey :inner-error)))
+             (catch Exception _ex :outer-error))))
+    ;; ---------------------------------------------------------------------------
+    (testing "when thrown exceptions are not caught"
+      (forms->test "using basic values"
+        (try (throw (ex-info "Hi" {}))
+             (catch IllegalArgumentException _e :error))
+        (try (into [] (map inc (throw (ex-info "Hi" {}))))
+             (catch IllegalArgumentException _e :error)))
+      (forms->test "using basic values in a nested try"
+        (try (try (throw (ex-info "Hi" {}))
+                  (catch IllegalArgumentException _ey :inner-error))
+             (catch IllegalArgumentException _ex :outer-error))
+        (try (into [] (try (map inc (throw (ex-info "Hi" {})))
+                           (catch IllegalArgumentException _ey :inner-error)))
+             (catch IllegalArgumentException _ex :outer-error))))
+    ;; ---------------------------------------------------------------------------
+    (testing "when thrown exceptions trigger a catch"
+      (forms->test "using basic values"
+        (try (throw (ex-info "Hi" {}))
+             (catch Exception _e :error))
+        (try (throw (ex-info "Hi" {}))
+             (catch IllegalArgumentException _e :first-catch)
+             (catch Exception _e :second-catch))
+        (try (throw (ex-info "Hi" {}))
+             (catch Exception _e :first-catch)
+             (catch RuntimeException _e :second-catch))
+        (try (into [] (map inc (throw (ex-info "Hi" {}))))
+             (catch Exception _e :error))
+        (try (into [] (map inc (throw (ex-info "Hi" {}))))
+             (catch IllegalArgumentException _e :first-catch)
+             (catch Exception _e :second-catch))
+        (try (into [] (map inc (throw (ex-info "Hi" {}))))
+             (catch Exception _e :first-catch)
+             (catch RuntimeException _e :second-catch)))
+      (forms->test "using basic values in a nested try"
+        (try (try (throw (ex-info "Hi" {}))
+                  (catch Exception _ey :inner-error))
+             (catch Exception _ex :outer-error))
+        (try (try (throw (ex-info "Hi" {}))
+                  (catch IllegalArgumentException _ey :inner-error))
+             (catch Exception _ex :outer-error))
+        (try (try (throw (ex-info "Hi" {}))
+                  (catch Exception _ey :inner-error))
+             (catch RuntimeException _ex :outer-error))
+        (try (into [] (try (map inc (throw (ex-info "Hi" {})))
+                           (catch Exception _ey :inner-error)))
+             (catch Exception _ex :outer-error))
+        (try (into [] (try (map inc (throw (ex-info "Hi" {})))
+                           (catch IllegalArgumentException _ey :inner-error)))
+             (catch Exception _ex :outer-error))
+        (try (into [] (try (map inc (throw (ex-info "Hi" {})))
+                           (catch Exception _ey :inner-error)))
+             (catch RuntimeException _ex :outer-error))))
+    ;; ---------------------------------------------------------------------------
+    (testing "when propagated exceptions are not caught"
+      (forms->test "using basic values"
+        (try (into [] (map inc ["a" "b" "c"]))
+             (catch IllegalArgumentException _e :error)))
+      (forms->test "using basic values in a nested try"
+        (try (into [] (try (map inc ["a" "b" "c"])
+                           (catch IllegalArgumentException _ey :inner-error)))
+             (catch IllegalArgumentException _ex :outer-error))))
+    ;; ---------------------------------------------------------------------------
+    (testing "when propagated exceptions trigger a catch"
+      (forms->test "using basic values"
+        (try (into [] (map inc ["a" "b" "c"]))
+             (catch Exception _e :error))
+        (try (into [] (map inc ["a" "b" "c"]))
+             (catch IllegalStateException _e :first-catch)
+             (catch RuntimeException _e :second-catch)
+             (catch Exception _e :third-catch))
+        (try (into [] (map inc ["a" "b" "c"]))
+             (catch IllegalStateException _e :first-catch)
+             (catch IllegalArgumentException _e :second-catch)
+             (catch RuntimeException _e :third-catch)
+             (catch Exception _e :fourth-catch))
+        (try (into [] (map inc ["a" "b" "c"]))
+             (catch ClassCastException _e :first-catch)
+             (catch RuntimeException _e :second-catch)
+             (catch Exception _e :third-catch))
+        (try (into [] (map inc ["a" "b" "c"]))
+             (catch IllegalStateException _e :first-catch)
+             (catch ClassCastException _e :second-catch)
+             (catch RuntimeException _e :third-catch)
+             (catch Exception _e :fourth-catch)))
+      (forms->test "using basic values in a nested try"
+        (try (into [] (try (map inc ["a" "b" "c"])
+                           (catch IllegalArgumentException _ey :inner-error)))
+             (catch Exception _ex :outer-error))
+        (try (into [] (try (map inc ["a" "b" "c"])
+                           (catch Exception _ey :inner-error)))
+             (catch IllegalArgumentException _ex :outer-error))
+        (try (into [] (try (map inc ["a" "b" "c"])
+                           (catch Exception _ey :inner-error)))
+             (catch RuntimeException _ex :outer-error))))))
+
+(comment
+  (testing "Test (try) with (finally)"
+    (testing "when nothing gets thrown"
+      ())
+    (testing "when an exception is thrown"
+      ()))
+  (testing "Test (try) with (catch) and (finally)"))
 
 (deftest ^:core test-do-side-effects
   (forms->test "Test (do) side effect behavior"

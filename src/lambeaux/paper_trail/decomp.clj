@@ -601,6 +601,7 @@
         catch-commands (find-catch (stack-peek call-stack) catches)]
     (-> ctx
         (assoc :is-throwing? (when is-throwing? (not (boolean catch-commands))))
+        (assoc :try-handlers (pop try-handlers))
         (default-update [:commands (concat catch-commands finally-commands cmds)]))))
 
 ;; ----------------------------------------------------------------------------------------
