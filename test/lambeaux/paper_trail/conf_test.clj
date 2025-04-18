@@ -1,9 +1,10 @@
 (ns lambeaux.paper-trail.conf-test
   "Conformance tests for the interpreter."
   (:require [clojure.test :as t :refer [deftest testing is]]
+            [clojure.walk :as w]
             [lambeaux.paper-trail.decomp :as ptd]
             [paper.trail :as-alias pt])
-  (:import  [clojure.lang ExceptionInfo]
+  (:import  [clojure.lang ExceptionInfo Atom]
             [java.io IOException]))
 
 ;; runtime ex
@@ -42,9 +43,14 @@
 
 (defn ex-comparable
   [obj]
-  (if-not (throwable? obj)
-    obj
-    (ex-comparable* obj)))
+  (w/postwalk
+   (fn [obj]
+     (if-not (instance? Atom obj)
+       obj
+       {:type ::pt/atom-comparable :data (deref obj)}))
+   (if-not (throwable? obj)
+     obj
+     (ex-comparable* obj))))
 
 (comment
 
@@ -353,7 +359,13 @@
                  (try (swap! x inc)
                       (swap! x inc)
                       x
-                      (finally (swap! x inc))))))
+                      (finally (swap! x inc)))))
+        (deref (let [x (atom 1)]
+                 (try (swap! x inc)
+                      (swap! x inc)
+                      x
+                      (finally (swap! x inc)
+                               (swap! x inc))))))
       (forms->test "using basic values in a nested try"
         (deref (let [x (atom 1)]
                  (try (swap! x inc)
@@ -361,10 +373,51 @@
                            (swap! x inc)
                            x
                            (finally (swap! x inc)))
-                      (finally (swap! x inc)))))))
+                      (finally (swap! x inc)))))
+        (deref (let [x (atom 1)]
+                 (try (swap! x inc)
+                      (try (swap! x inc)
+                           (swap! x inc)
+                           x
+                           (finally (swap! x inc)
+                                    (swap! x inc)))
+                      (finally (swap! x inc)
+                               (swap! x inc))))))
+      (forms->test "using basic values in a nested finally"
+        (deref (let [x (atom 1)]
+                 (try (swap! x inc)
+                      (finally
+                        (try (swap! x inc)
+                             (swap! x inc)
+                             x
+                             (finally (swap! x inc)))))))))
     (testing "when an exception is thrown"
-      (forms->test "using basic values")
-      (forms->test "using basic values in a nested try")))
+      (forms->test "using basic values"
+        (deref (let [x (atom 1)]
+                 (try (swap! x inc)
+                      (try (swap! x inc)
+                           (throw (ex-info "Hi" (hash-map :the-atom x)))
+                           x
+                           (finally (swap! x inc)))
+                      (finally (swap! x inc))))))
+      (forms->test "using basic values in a nested try"
+        (deref (let [x (atom 1)]
+                 (try (swap! x inc)
+                      (try (swap! x inc)
+                           (throw (ex-info "Hi" (hash-map :the-atom x)))
+                           x
+                           (finally (swap! x inc)
+                                    (swap! x inc)))
+                      (finally (swap! x inc)
+                               (swap! x inc))))))
+      (forms->test "using basic values in a nested finally"
+        (deref (let [x (atom 1)]
+                 (try (swap! x inc)
+                      (finally
+                        (try (throw (ex-info "Hi" (hash-map :the-atom x)))
+                             (swap! x inc)
+                             x
+                             (finally (swap! x inc))))))))))
   ;; ---------------------------------------------------------------------------
   (testing "Test (try) with (catch) and (finally)"))
 

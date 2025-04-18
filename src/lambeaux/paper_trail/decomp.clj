@@ -437,7 +437,7 @@
   (next-command ctx))
 
 (defn process-invoke-fn
-  [{:keys [enable-try-catch-support? is-throwing? is-finally? call-stack]
+  [{:keys [enable-try-catch-support? throwing-ex is-throwing? is-finally? call-stack]
     [cmd & _] :commands
     :as ctx}]
   (let [arg-count (:arg-count cmd)
@@ -462,13 +462,14 @@
                             (stack-take arg-count call-stack))]
     (when (and ex? (not enable-try-catch-support?))
       (throw result))
-    (let [set-throwing? (boolean (or is-throwing? ex?))]
-      (-> ctx
-          (assoc :is-throwing? set-throwing?)
-          (assoc :is-finally? (if set-throwing? false is-finally?))
-          (default-update
-           [:call-stack (conj (apply list (drop arg-count call-stack))
-                              (stack-eval-result result))])))))
+    (-> ctx
+        (assoc
+         :is-throwing? (boolean (or is-throwing? ex?))
+         :is-finally? (if ex? false is-finally?)
+         :throwing-ex (if ex? result throwing-ex))
+        (default-update
+         [:call-stack (conj (apply list (drop arg-count call-stack))
+                            (stack-eval-result result))]))))
 
 (defn process-invoke-throw
   [{:keys [enable-try-catch-support? call-stack]
@@ -477,8 +478,10 @@
     (throw (stack-peek call-stack)))
   (-> ctx
       (next-command)
-      (assoc :is-throwing? true)
-      (assoc :is-finally? false)))
+      (assoc
+       :is-throwing? true
+       :is-finally? false
+       :throwing-ex (stack-peek call-stack))))
 
 (defn process-scalar
   [{:keys [call-stack source-scope impl-scope]
@@ -596,19 +599,23 @@
                           (select-keys cmd [:id :catches :finally]))))))
 
 (defn process-cleanup-try
-  [{:keys [is-throwing? call-stack try-handlers]
+  [{:keys [is-throwing? throwing-ex try-handlers]
     [_ & cmds] :commands
     :as ctx}]
   (let [{:keys [catches] finally-commands :finally} (peek try-handlers)
-        catch-commands (find-catch (stack-peek call-stack) catches)]
+        catch-commands (find-catch throwing-ex catches)
+        still-throwing? (boolean (when is-throwing? (not catch-commands)))]
     (-> ctx
-        (assoc :is-throwing? (when is-throwing? (not (boolean catch-commands))))
-        (assoc :try-handlers (pop try-handlers))
+        (assoc
+         :is-throwing? still-throwing?
+         :try-handlers (pop try-handlers)
+         :throwing-ex (when still-throwing? throwing-ex))
         (default-update [:commands (concat catch-commands finally-commands cmds)]))))
 
 (defn process-finally
   [{:keys [fn-idx commands] :as ctx}]
   (case (:cmd (first commands))
+    ;; todo: the fn-stack is still leaking into the context, clean it up
     :begin-finally (update-in (next-command ctx) [:fn-stack fn-idx :finally-depth] inc)
     :end-finally   (update-in (next-command ctx) [:fn-stack fn-idx :finally-depth] dec)))
 
@@ -616,11 +623,11 @@
 
 (defn wrap-throwing
   [handler]
-  (let [cleanup-op? #{:unbind-name :cleanup-try}]
+  (let [allowed-op? #{:unbind-name :cleanup-try :set-context :begin-finally :end-finally}]
     (fn [{:keys [is-throwing? is-finally?] [{:keys [cmd]}] :commands :as ctx}]
       (if (and is-throwing?
                (not is-finally?)
-               (not (cleanup-op? cmd)))
+               (not (allowed-op? cmd)))
         (process-no-op ctx)
         (handler ctx)))))
 
@@ -770,12 +777,13 @@
    :try-handlers (list)
    :is-throwing? false
    :is-finally? false
+   :throwing-ex nil
    :enable-try-catch-support? *enable-try-catch-support*})
 
 (defn execute
   [commands]
   (let [command-handlers (create-command-handlers)]
-    (loop [{:keys [enable-try-catch-support? is-throwing? fn-idx] :as ctx} (new-exec-ctx commands)]
+    (loop [{:keys [enable-try-catch-support? throwing-ex is-throwing? fn-idx] :as ctx} (new-exec-ctx commands)]
       (let [{:keys [commands call-stack] :as _fctx} (get-in ctx [:fn-stack fn-idx])
             h (get command-handlers (:cmd (first commands)))]
         (if h
@@ -789,7 +797,7 @@
             ;; process with something like wrap-uncaught-ex but forward any wrapped
             ;; exception accordingly since they don't count as 'interpreter errors'
             ;; (maybe make a deftype for internal interpreter errors/exceptions)
-            (throw (stack-peek call-stack))
+            (throw throwing-ex)
             (stack-peek call-stack)))))))
 
 (defn get-fctx
@@ -811,11 +819,11 @@
         initial-ctx (new-exec-ctx commands)
         seq* (execute-seq command-handlers initial-ctx)
         final-ctx (last seq*)
-        {:keys [enable-try-catch-support? is-throwing?]} final-ctx
+        {:keys [enable-try-catch-support? throwing-ex is-throwing?]} final-ctx
         call-stack (:call-stack (get-fctx final-ctx))]
     (if (and enable-try-catch-support? is-throwing?)
-            ;; SEE ABOVE TODO ITEM
-      (throw (stack-peek call-stack))
+      ;; SEE ABOVE TODO ITEM
+      (throw throwing-ex)
       (stack-peek call-stack))
     seq*))
 
@@ -857,9 +865,12 @@
                 (create-commands form))]
      (->> cmds
           (ctx-seq)
-          (map (fn [{:keys [fn-idx is-throwing?] :as ctx}]
+          (map (fn [{:keys [fn-idx throwing-ex is-throwing? is-finally?] :as ctx}]
                  (-> (get-in ctx [:fn-stack fn-idx])
-                     (assoc :is-throwing? is-throwing?))))
+                     (assoc 
+                      :is-throwing? is-throwing? 
+                      :is-finally? is-finally?
+                      :throwing-ex (boolean throwing-ex)))))
           (map (fn [{:keys [commands] :as ctx}]
                  (-> ctx
                      (assoc :next-command (first commands))
