@@ -213,9 +213,11 @@
   [{:keys [form->commands in-macro-impl?] :as attrs} body]
   (let [form->commands (partial form->commands attrs)]
     (concat [{:cmd :begin-form :type :special :op 'finally :impl? in-macro-impl?}
+             {:cmd :begin-finally}
              {:cmd :set-context :props {:is-finally? true}}]
             (mapcat form->commands body)
             [{:cmd :set-context :props {:is-finally? false}}
+             {:cmd :end-finally}
              {:cmd :end-form :type :special :op 'finally :impl? in-macro-impl?}])))
 
 (defn code-form?
@@ -604,6 +606,12 @@
         (assoc :try-handlers (pop try-handlers))
         (default-update [:commands (concat catch-commands finally-commands cmds)]))))
 
+(defn process-finally
+  [{:keys [fn-idx commands] :as ctx}]
+  (case (:cmd (first commands))
+    :begin-finally (update-in (next-command ctx) [:fn-stack fn-idx :finally-depth] inc)
+    :end-finally   (update-in (next-command ctx) [:fn-stack fn-idx :finally-depth] dec)))
+
 ;; ----------------------------------------------------------------------------------------
 
 (defn wrap-throwing
@@ -615,6 +623,22 @@
                (not (cleanup-op? cmd)))
         (process-no-op ctx)
         (handler ctx)))))
+
+(defn wrap-call-stack
+  [handler]
+  (fn [{:keys [fn-idx call-stack-primary call-stack-finally finally-depth] :as ctx}]
+    (let [[stack-name stack-to-use] (if (zero? finally-depth)
+                                      [:call-stack-primary call-stack-primary]
+                                      [:call-stack-finally call-stack-finally])
+          ctx* (handler (-> ctx
+                            (assoc :call-stack stack-to-use)
+                            (assoc-in [:fn-stack fn-idx :call-stack] stack-to-use)))
+          ;; todo: fix stack writes for better parity
+          ;; modified-stack (:call-stack ctx*)
+          modified-stack (get-in ctx* [:fn-stack fn-idx :call-stack])]
+      (-> ctx*
+          (dissoc :call-stack)
+          (assoc-in [:fn-stack fn-idx stack-name] modified-stack)))))
 
 (defn wrap-check-not-infinite
   [handler]
@@ -652,6 +676,7 @@
   ([wrap-throwing? handler]
    (cond-> handler
      wrap-throwing? wrap-throwing
+     true           wrap-call-stack
      true           wrap-check-not-infinite
      true           wrap-convenience-mappings
      true           wrap-uncaught-ex)))
@@ -704,6 +729,8 @@
     :replay-commands process-replay-commands
     :setup-try       process-setup-try
     :cleanup-try     process-cleanup-try
+    :begin-finally   process-finally
+    :end-finally     process-finally
     ;; --------------------------------------------------------------------------
     :intern-var      process-no-op ;; TODO: fix
     :recur-target    process-no-op ;; TODO: fix
@@ -728,7 +755,10 @@
   [commands]
   {:commands commands
    :command-history (list)
-   :call-stack (list)
+   ;; :call-stack (list) ;; (added with middleware)
+   :call-stack-primary (list)
+   :call-stack-finally (list)
+   :finally-depth 0
    :source-scope {}
    :impl-scope {}
    :state {}})

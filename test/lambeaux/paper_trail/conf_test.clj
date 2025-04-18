@@ -344,14 +344,28 @@
              (catch IllegalArgumentException _ex :outer-error))
         (try (into [] (try (map inc ["a" "b" "c"])
                            (catch Exception _ey :inner-error)))
-             (catch RuntimeException _ex :outer-error))))))
-
-(comment
+             (catch RuntimeException _ex :outer-error)))))
+  ;; ---------------------------------------------------------------------------
   (testing "Test (try) with (finally)"
     (testing "when nothing gets thrown"
-      ())
+      (forms->test "using basic values"
+        (deref (let [x (atom 1)]
+                 (try (swap! x inc)
+                      (swap! x inc)
+                      x
+                      (finally (swap! x inc))))))
+      (forms->test "using basic values in a nested try"
+        (deref (let [x (atom 1)]
+                 (try (swap! x inc)
+                      (try (swap! x inc)
+                           (swap! x inc)
+                           x
+                           (finally (swap! x inc)))
+                      (finally (swap! x inc)))))))
     (testing "when an exception is thrown"
-      ()))
+      (forms->test "using basic values")
+      (forms->test "using basic values in a nested try")))
+  ;; ---------------------------------------------------------------------------
   (testing "Test (try) with (catch) and (finally)"))
 
 (deftest ^:core test-do-side-effects
