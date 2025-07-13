@@ -781,24 +781,35 @@
    :enable-try-catch-support? *enable-try-catch-support*})
 
 (defn execute
-  [commands]
-  (let [command-handlers (create-command-handlers)]
-    (loop [{:keys [enable-try-catch-support? throwing-ex is-throwing? fn-idx] :as ctx} (new-exec-ctx commands)]
-      (let [{:keys [commands call-stack] :as _fctx} (get-in ctx [:fn-stack fn-idx])
-            h (get command-handlers (:cmd (first commands)))]
-        (if h
-          (recur (h ctx))
-          (if (and enable-try-catch-support? is-throwing?)
-            ;; todo: when you support drilling down into function calls, fix
-            ;; this to pop fns off the fn-stack and only throw when none remain
-            ;; ---
-            ;; also consider wrapping exceptions we know should be thrown inside
-            ;; ex-info's with attached metadata, then wrap the entire interpreter
-            ;; process with something like wrap-uncaught-ex but forward any wrapped
-            ;; exception accordingly since they don't count as 'interpreter errors'
-            ;; (maybe make a deftype for internal interpreter errors/exceptions)
-            (throw throwing-ex)
-            (stack-peek call-stack)))))))
+  ([commands]
+   (execute commands nil))
+  ([commands stop-idx]
+   (let [stop-early? (if (and (int? stop-idx)
+                              (or (zero? stop-idx) (pos-int? stop-idx)))
+                       (partial = stop-idx)
+                       (constantly false))
+         command-handlers (create-command-handlers)
+         commands* (map-indexed (fn [idx cmd] (assoc cmd :cmd-idx idx)) commands)
+         ctx* (new-exec-ctx commands*)]
+     (loop [{:keys [enable-try-catch-support? throwing-ex is-throwing? fn-idx] :as ctx} ctx*]
+       (let [{:keys [commands command-history call-stack] :as _fctx} (get-in ctx [:fn-stack fn-idx])
+             idx (count command-history)
+             h (get command-handlers (:cmd (first commands)))]
+         (if (stop-early? idx)
+           ctx
+           (if h
+             (recur (h ctx))
+             (if (and enable-try-catch-support? is-throwing?)
+               ;; todo: when you support drilling down into function calls, fix
+               ;; this to pop fns off the fn-stack and only throw when none remain
+               ;; ---
+               ;; also consider wrapping exceptions we know should be thrown inside
+               ;; ex-info's with attached metadata, then wrap the entire interpreter
+               ;; process with something like wrap-uncaught-ex but forward any wrapped
+               ;; exception accordingly since they don't count as 'interpreter errors'
+               ;; (maybe make a deftype for internal interpreter errors/exceptions)
+               (throw throwing-ex)
+               (stack-peek call-stack)))))))))
 
 (defn get-fctx
   [context]
@@ -854,6 +865,15 @@
                 (create-commands form))]
      (execute cmds))))
 
+(defn run-eval-to
+  ([idx form]
+   (run-eval-to idx form nil))
+  ([idx form args]
+   (let [cmds (if args
+                (create-commands form args)
+                (create-commands form))]
+     (execute cmds idx))))
+
 (defn run-debug-report
   ([form]
    (run-debug-report form nil))
@@ -867,8 +887,8 @@
           (ctx-seq)
           (map (fn [{:keys [fn-idx throwing-ex is-throwing? is-finally?] :as ctx}]
                  (-> (get-in ctx [:fn-stack fn-idx])
-                     (assoc 
-                      :is-throwing? is-throwing? 
+                     (assoc
+                      :is-throwing? is-throwing?
                       :is-finally? is-finally?
                       :throwing-ex (boolean throwing-ex)))))
           (map (fn [{:keys [commands] :as ctx}]

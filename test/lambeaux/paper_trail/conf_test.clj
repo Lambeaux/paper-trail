@@ -2,7 +2,7 @@
   "Conformance tests for the interpreter."
   (:require [clojure.test :as t :refer [deftest testing is]]
             [clojure.walk :as w]
-            [lambeaux.paper-trail.decomp :as ptd]
+            [lambeaux.paper-trail.decomp :as impl]
             [paper.trail :as-alias pt])
   (:import  [clojure.lang ExceptionInfo Atom]
             [java.io IOException]))
@@ -109,12 +109,12 @@
                   ;; the form, the test results might be skewed.
                   `(testing (str '~form)
                      (is (= (wrap* (capture-result (eval '~form)))
-                            (wrap* (capture-result (ptd/run-eval '~form)))))))
+                            (wrap* (capture-result (impl/run-eval '~form)))))))
                 forms))))
 
 (defn compare-eval*
   [& forms]
-  (let [handlers [`eval `ptd/run-eval]
+  (let [handlers [`eval `impl/run-eval]
         test-cases (for [handler-sym handlers form forms]
                      {:handler handler-sym :input form})]
     (mapv (fn [{:keys [handler input] :as tcase}]
@@ -123,10 +123,14 @@
               (assoc tcase :outcome (update outcome ::pt/result ex-comparable))))
           test-cases)))
 
+(defn all-evals-match?
+  [compare-reports]
+  (apply = (map :outcome compare-reports)))
+
 (comment
   "How do use compare-eval to investigate conformance test failures: "
   (compare-eval* '(try (into [] (map inc ["a" "b" "c"]))))
-  (apply = (map :outcome *1)))
+  (all-evals-match? *1))
 
 (deftest ^:minimal test-core-fns
   (forms->test "Test basic core functions"
