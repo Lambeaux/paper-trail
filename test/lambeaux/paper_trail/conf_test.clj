@@ -423,7 +423,98 @@
                              x
                              (finally (swap! x inc))))))))))
   ;; ---------------------------------------------------------------------------
-  (testing "Test (try) with (catch) and (finally)"))
+  (testing "Test (try) with (catch) and (finally)"
+    (forms->test "when nothing is thrown"
+      (let [int-atom (atom 1)
+            vec-val (vector 1 2 3 4 5)
+            result (try
+                     (into [] (filter odd? (map inc vec-val)))
+                     (catch Exception _e :error)
+                     (finally (swap! int-atom inc)))]
+        (hash-map :int-atom (deref int-atom) :result result)))
+    (forms->test "when an exception is manually thrown"
+      (let [int-atom (atom 1)
+            result (try
+                     (into [] (filter odd? (throw (ex-info "Hi" {}))))
+                     (catch Exception _e :error)
+                     (finally (swap! int-atom inc)))]
+        (hash-map :int-atom (deref int-atom) :result result)))
+    (forms->test "when an exception propogates up from the call stack"
+      (let [int-atom (atom 1)
+            vec-val (map str (vector 1 2 3 4 5))
+            result (try
+                     (into [] (filter odd? (map inc vec-val)))
+                     (catch Exception _e :error)
+                     (finally (swap! int-atom inc)))]
+        (hash-map :int-atom (deref int-atom) :result result)))
+    (forms->test "when an exception is caught by the inner catch"
+      (let [int-atom (atom 1)
+            vec-val (map str (vector 1 2 3 4 5))
+            result (try
+                     (into [] (try
+                                (filter odd? (mapv inc vec-val))
+                                (catch ClassCastException _cce [:inner-error])
+                                (finally (swap! int-atom inc))))
+                     (catch Exception _e :error)
+                     (finally (swap! int-atom inc)))]
+        (hash-map :int-atom (deref int-atom) :result result)))
+    (forms->test "when an exception is caught by the outer catch"
+      (let [int-atom (atom 1)
+            vec-val (map str (vector 1 2 3 4 5))
+            result (try
+                     (into [] (try
+                                (filter odd? (map inc vec-val))
+                                (catch IllegalArgumentException _iae [:inner-error])
+                                (finally (swap! int-atom inc))))
+                     (catch Exception _e :error)
+                     (finally (swap! int-atom inc)))]
+        (hash-map :int-atom (deref int-atom) :result result)))
+    (forms->test "when an inner exception is not caught at all"
+      (let [int-atom (atom 1)
+            vec-val (map str (vector 1 2 3 4 5))
+            result (try
+                     (into [] (try
+                                (filter odd? (mapv inc vec-val))
+                                (catch IllegalArgumentException _iae [:inner-error])
+                                (finally (swap! int-atom inc))))
+                     (catch IllegalStateException _e :error)
+                     (finally (swap! int-atom inc)))]
+        (hash-map :int-atom (deref int-atom) :result result)))
+    (forms->test "when an outer exception is not caught at all"
+      (let [int-atom (atom 1)
+            vec-val (map str (vector 1 2 3 4 5))
+            result (try
+                     (into [] (try
+                                (filter odd? (map inc vec-val))
+                                (catch IllegalArgumentException _iae [:inner-error])
+                                (finally (swap! int-atom inc))))
+                     (catch IllegalStateException _e :error)
+                     (finally (swap! int-atom inc)))]
+        (hash-map :int-atom (deref int-atom) :result result)))
+    (forms->test "when an exception is thrown in a finally after catch resolution"
+      (let [int-atom (atom 1)
+            vec-val (map str (vector 1 2 3 4 5))
+            result (try
+                     (into [] (try
+                                (filter odd? (mapv inc vec-val))
+                                (catch ClassCastException _iae [:inner-error])
+                                (finally (swap! int-atom inc)
+                                         (throw (ex-info "Hi" {})))))
+                     (catch Exception _e :error)
+                     (finally (swap! int-atom inc)))]
+        (hash-map :int-atom (deref int-atom) :result result)))
+    (forms->test "when an exception is thrown in a finally without catch resolution"
+      (let [int-atom (atom 1)
+            vec-val (map str (vector 1 2 3 4 5))
+            result (try
+                     (into [] (try
+                                (filter odd? (mapv inc vec-val))
+                                (catch IllegalArgumentException _iae [:inner-error])
+                                (finally (swap! int-atom inc)
+                                         (throw (ex-info "Hi" {})))))
+                     (catch Exception _e :error)
+                     (finally (swap! int-atom inc)))]
+        (hash-map :int-atom (deref int-atom) :result result)))))
 
 (deftest ^:core test-do-side-effects
   (forms->test "Test (do) side effect behavior"

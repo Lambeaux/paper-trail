@@ -513,10 +513,12 @@
                        :command-value value
                        :call-stack (stack-peek call-stack)
                        :state (get state state-id))
-        val-to-bind  (case val-to-bind
-                       nil ::pt/nil
-                       false ::pt/false
-                       val-to-bind)
+        val-to-bind  (if-not (realized-val? val-to-bind)
+                       val-to-bind
+                       (case val-to-bind
+                         nil ::pt/nil
+                         false ::pt/false
+                         val-to-bind))
         keyval-pairs (if impl?
                        [:impl-scope (update impl-scope bind-id #(conj % val-to-bind))]
                        [:source-scope (update source-scope bind-id #(conj % val-to-bind))])]
