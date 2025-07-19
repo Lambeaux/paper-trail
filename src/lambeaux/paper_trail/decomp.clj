@@ -305,6 +305,10 @@
   []
   {:form->commands form->commands
    :argdef-stack (list)
+   ;; TODO: replace recur-idx with an AtomicInteger since it is not consistently
+   ;; being incremented everywhere
+   ;; NOTE: Could just use an Atom and the return val of swap! so this is cross-platform
+   ;; compatible in other Clojure dialects
    :recur-idx 0
    :in-macro-impl? false})
 
@@ -340,12 +344,13 @@
   (apply update-in (concat [ctx [:fn-stack fn-idx] f] args)))
 
 (defn next-command
-  [{:keys [command-history]
+  [{:keys [cmd-counter command-history]
     [cmd & cmds] :commands
     :as ctx}]
-  (update-fn-ctx ctx (with-keyvals
-                       :commands cmds
-                       :command-history (conj command-history cmd))))
+  (let [cmd* (assoc cmd :cmd-idx (swap! cmd-counter inc))]
+    (update-fn-ctx ctx (with-keyvals
+                         :commands cmds
+                         :command-history (conj command-history cmd*)))))
 
 (defn default-update
   ([ctx kvs]
@@ -775,6 +780,7 @@
 (defn new-exec-ctx
   [commands]
   {:fn-idx 0
+   :cmd-counter (atom -1)
    :fn-stack [(new-fn-ctx commands)]
    :try-handlers (list)
    :is-throwing? false
@@ -791,17 +797,18 @@
                        (partial = stop-idx)
                        (constantly false))
          command-handlers (create-command-handlers)
-         commands* (map-indexed (fn [idx cmd] (assoc cmd :cmd-idx idx)) commands)
+         commands* commands
          ctx* (new-exec-ctx commands*)]
-     (loop [{:keys [enable-try-catch-support? throwing-ex is-throwing? fn-idx] :as ctx} ctx*]
-       (let [{:keys [commands command-history call-stack] :as _fctx} (get-in ctx [:fn-stack fn-idx])
-             idx (count command-history)
+     (loop [{:keys [cmd-counter throwing-ex is-throwing? fn-idx] :as ctx} ctx*]
+       (let [{:keys [commands call-stack] :as _fctx} (get-in ctx [:fn-stack fn-idx])
+             ;; _ (println (pr-str (first command-history)))
+             idx (inc @cmd-counter)
              h (get command-handlers (:cmd (first commands)))]
          (if (stop-early? idx)
            ctx
            (if h
              (recur (h ctx))
-             (if (and enable-try-catch-support? is-throwing?)
+             (if is-throwing?
                ;; todo: when you support drilling down into function calls, fix
                ;; this to pop fns off the fn-stack and only throw when none remain
                ;; ---
