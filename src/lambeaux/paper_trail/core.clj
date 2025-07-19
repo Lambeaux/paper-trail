@@ -1,7 +1,6 @@
 (ns lambeaux.paper-trail.core
-  (:require [paper.trail :as-alias pt]
-            [lambeaux.paper-trail.samples :as s]
-            [clojure.pprint :as pretty]
+  (:require [lambeaux.paper-trail.impl.util :as ptu]
+            [lambeaux.paper-trail :as-alias pt]
             [clojure.repl :as repl]))
 
 (defn reload-me []
@@ -26,73 +25,6 @@
   [label x]
   (swap! logs conj [:spy label x])
   x)
-
-;; ---------------------------------------------------------
-;; Predicates / Resolvers
-;; ---------------------------------------------------------
-
-(def clojure-core-symbols->vars
-  (ns-publics (the-ns 'clojure.core)))
-
-(defn core-fn? [obj]
-  (contains? clojure-core-symbols->vars obj))
-
-(defn to-namespace
-  "Attempts to convert an object to a namespace,
-   returning the namespace if successful, or nil
-   otherwise. Will convert symbols to namespaces."
-  [obj]
-  (try
-    (the-ns obj)
-    (catch Exception _e nil)))
-
-(defn try-resolve
-  "Attempts to resolve the provided object to a var.
-   Supports full qualifications using the full name
-   or an alias."
-  [{::pt/keys [current-ns] :as _ctx} obj]
-  (cond
-    (qualified-symbol? obj) (let [obj-ns (-> obj
-                                             namespace
-                                             symbol)]
-                              (if (to-namespace obj-ns)
-                                (resolve obj)
-                                (ns-resolve (-> current-ns
-                                                ns-aliases
-                                                (get obj-ns)
-                                                (to-namespace))
-                                            (symbol (name obj)))))
-    (core-fn? obj) (resolve obj)
-    :else (ns-resolve current-ns obj)))
-
-(defn accessible-macro? [ctx obj]
-  (try
-    (when-let [resolved (try-resolve ctx obj)]
-      (boolean (:macro (meta resolved))))
-    (catch Exception _e false)))
-
-(defn accessible-fn? [ctx obj]
-  (or (keyword? obj)
-      (try
-        (when-let [resolved (try-resolve ctx obj)]
-          (fn? @resolved))
-        (catch Exception _e false))))
-
-(defn ->impl [ctx sym]
-  (if (keyword? sym) 
-    sym 
-    @(try-resolve ctx sym)))
-
-(defn map-impl-fn [ctx]
-  #(if (accessible-fn? ctx %) (->impl ctx %) %))
-
-(defn terminal? [obj]
-  (or (keyword? obj)
-      (number? obj)
-      (boolean? obj)
-      (nil? obj)
-      (char? obj)
-      (string? obj)))
 
 ;; ---------------------------------------------------------
 ;; Descendent Recursive Interpreter
@@ -121,15 +53,15 @@
       ;; Need to eval fn* because its not in clojure core
       (= verb 'fn*) (assoc ctx :value (eval (spy :fn* in-form)))
       ;; ---- Verb is known and invokable ----
-      (accessible-macro? ctx verb)
+      (ptu/accessible-macro? ctx verb)
       (handle-list ctx (spy :expanded (macroexpand in-form)))
-      (accessible-fn? ctx verb)
+      (ptu/accessible-fn? ctx verb)
       (let [form (doall (cons verb
                               (->> (spy :args args)
                                    (map (partial handle-form ctx))
                                    (map :value))))
-            result (apply (->impl ctx verb)
-                          (map (map-impl-fn ctx)
+            result (apply (ptu/->impl ctx verb)
+                          (map (ptu/map-impl-fn ctx)
                                (rest form)))]
         (add-log :form form)
         (add-log :result result)
@@ -162,8 +94,8 @@
                                form))
       (and (symbol? form)
            (contains? arg-map form)) (assoc ctx :value (spy :argmap (arg-map form)))
-      (accessible-fn? ctx form) (assoc ctx :value form)
-      (terminal? form) (assoc ctx :value form)
+      (ptu/accessible-fn? ctx form) (assoc ctx :value form)
+      (ptu/terminal? form) (assoc ctx :value form)
       :else (throw (ex-info "Unknown handle-form case" (assoc ctx :err-form form))))
     (catch clojure.lang.ExceptionInfo ei
       (throw ei))

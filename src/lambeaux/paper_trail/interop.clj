@@ -1,6 +1,6 @@
 (ns lambeaux.paper-trail.interop
   (:require [lambeaux.paper-trail.interop-proto :as proto]
-            [paper.trail :as-alias pt]))
+            [lambeaux.paper-trail :as-alias pt]))
 
 ;; ----------------------------------------------------------------------------------------
 ;; LIST HELPERS

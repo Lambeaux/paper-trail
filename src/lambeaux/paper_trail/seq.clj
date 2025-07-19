@@ -1,45 +1,13 @@
 (ns lambeaux.paper-trail.seq
-  (:require [lambeaux.paper-trail.core :as core]
-            [paper.trail :as-alias pt])
-  (:import [clojure.lang IObj Cons]))
+  (:require [lambeaux.paper-trail.impl.util :as ptu]
+            [lambeaux.paper-trail :as-alias pt])
+  (:import [clojure.lang IObj]))
 
 (def temp-ctx {::pt/current-ns *ns*})
 
 (defn child-seq [x]
   (let [has-children? #(if (string? %) false (seqable? %))]
     (tree-seq has-children? seq x)))
-
-;; - Use symbols to represent literals in a dispatch map ('let, 'try, etc)
-;; - Use keywords to represent types in a dispatch map (:list, :vector, :map, etc)
-;; - Use multi-methods to arrive at the key when preds are needed??
-;; - Use a map to arrive at dispatch keywords??
-
-(defn classify [x]
-  (cond (string? x)            :type/string
-        (number? x)            :type/number
-        (boolean? x)           :type/boolean
-        (char? x)              :type/char
-        (class? x)             :type/class
-        (fn? x)                :type/fn
-        (nil? x)               :type/nil
-        (simple-keyword? x)    :type/keyword-simple
-        (simple-symbol? x)     :type/symbol-simple
-        (qualified-keyword? x) :type/keyword-qual
-        (qualified-symbol? x)  :type/symbol-qual
-        (map? x)               :type/map
-        (vector? x)            :type/vector
-        (set? x)               :type/set
-        (list? x)              (let [op (first x)]
-                                 (cond (core/accessible-macro? temp-ctx op) :type/list-macro
-                                       (core/accessible-fn? temp-ctx op) :type/list-fn
-                                       :else :type/list-literal))
-        (instance? Cons x)     (let [op (first x)]
-                                 (cond (core/accessible-macro? temp-ctx op) :type/list-macro
-                                       (core/accessible-fn? temp-ctx op) :type/list-fn
-                                       :else :type/cons))
-        (seq? x)               :type/seq
-        :else (throw (ex-info (str "Type " (type x) " is unknown for value: " x)
-                              {:value x :type (type x)}))))
 
 (declare post-process)
 
@@ -67,8 +35,8 @@
   [{:keys [args] [exp & exprs] :forms :as ctx}]
   (tap> ["Handle List Fn" ctx])
   (let [exp-size (count exp)
-        result (apply (core/->impl temp-ctx (first exp))
-                      (map (core/map-impl-fn temp-ctx)
+        result (apply (ptu/->impl temp-ctx (first exp))
+                      (map (ptu/map-impl-fn temp-ctx)
                            (rest (take exp-size args))))
         result (if (instance? IObj result)
                  (with-meta result {::pt/is-evaled? true})
@@ -121,7 +89,7 @@
 (defn pre-process
   [ctx]
   (loop [{:keys [dispatch-pre forms] [exp & exprs] :input :as ctx*} ctx]
-    (let [type-kw (classify exp)
+    (let [type-kw (ptu/classify exp)
           handler (or (when (list? exp) (dispatch-pre (first exp)))
                       (dispatch-pre type-kw))]
       (tap> ["Pre Process" type-kw handler ctx*])
@@ -139,7 +107,7 @@
 (defn post-process
   [ctx]
   (loop [{:keys [dispatch-post args scope] [exp & exprs] :forms :as ctx*} ctx]
-    (let [type-kw (classify exp)
+    (let [type-kw (ptu/classify exp)
           handler (or (when (list? exp) (dispatch-post (first exp)))
                       (dispatch-post type-kw))
           {::pt/keys [is-evaled?]} (meta exp)]

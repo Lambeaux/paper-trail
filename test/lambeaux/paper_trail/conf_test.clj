@@ -3,7 +3,7 @@
   (:require [clojure.test :as t :refer [deftest testing is]]
             [clojure.walk :as w]
             [lambeaux.paper-trail.decomp :as impl]
-            [paper.trail :as-alias pt])
+            [lambeaux.paper-trail :as-alias pt])
   (:import  [clojure.lang ExceptionInfo Atom]
             [java.io IOException]))
 
@@ -534,6 +534,11 @@
           @a))))
 
 (deftest ^:core test-anonymous-functions
+  #_(forms->test "Test invoke (fn) directly"
+      ((fn [] 100))
+      ((fn [x] (+ 100 x)) 1)
+      ((fn [x y] (+ 100 x y)) 1 2)
+      ((fn [x y z] (+ 100 x y z)) 1 2 3))
   (forms->test "Test (fn) inside lazy sequences"
     (map (fn [x] (inc x))
          (filter (fn [x] (odd? x))
