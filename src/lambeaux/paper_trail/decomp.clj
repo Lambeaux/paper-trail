@@ -3,7 +3,7 @@
             [lambeaux.paper-trail.seq :as pts]
             [clojure.set :as set]
             [paper.trail :as-alias pt])
-  (:import [clojure.lang IObj IPending LazySeq]))
+  (:import [clojure.lang IObj IPending LazySeq ArityException]))
 
 (defn decompose-form
   [form]
@@ -91,7 +91,7 @@
                             (macroexpand form*))
             [{:cmd :end-form :type :macro :op (first form) :impl? in-macro-impl?}])))
 
-(defn fndef->bodies
+(defn fnform->metainf
   [form]
   (let [nil-body (list 'do nil)
         parse-body (fn [sig]
@@ -119,6 +119,31 @@
                       [(count (first sig)) (parse-body sig)])
                     params)))))
 
+(defn load-fn-commands
+  [{:keys [form->commands argdef-stack recur-idx in-macro-impl?]
+    :as attrs} metainf]
+  (reduce (fn [accum k]
+            (let [{:keys [argdefs body]} (get accum k)
+                  attrs* (assoc attrs :argdef-stack (conj argdef-stack argdefs))
+                  commands* (concat (map (fn [k argdef]
+                                           {:cmd :bind-name
+                                            :bind-id argdef
+                                            :bind-from :state
+                                            :state-id k
+                                            :impl? in-macro-impl?})
+                                         (map #(str "arg-" %) (range (count argdefs)))
+                                         argdefs)
+                                    [{:cmd :recur-target :idx recur-idx :impl? false}]
+                                    (form->commands attrs* body))]
+              (update accum k #(assoc % :commands commands*))))
+          metainf
+          (keys metainf)))
+
+(defn handle-fn
+  [attrs form]
+  (let [arity->metainf (load-fn-commands attrs (fnform->metainf form))]
+    [{:cmd :create-fn :arities arity->metainf}]))
+
 (defn handle-def
   [{:keys [form->commands argdef-stack recur-idx in-macro-impl? enable-cmd-gen? args]
     :as attrs} form]
@@ -136,7 +161,7 @@
                      (= 'fn* (first (last form)))
                      (= 'clojure.core/fn (first (last form)))))
       (throw (IllegalArgumentException. (str "Provided var is not a fn: " form)))
-      (let [{:keys [argdefs body]} (get (fndef->bodies (last form)) (count args))]
+      (let [{:keys [argdefs body]} (get (fnform->metainf (last form)) (count args))]
         (concat (map (fn [argdef arg]
                        {:cmd :bind-name
                         :bind-id argdef
@@ -279,6 +304,9 @@
 (def form-handlers
   {'def             (wrap-check-macro handle-def)
    'do              (wrap-check-macro handle-do)
+   'fn              (wrap-check-macro handle-fn)
+   'fn*             (wrap-check-macro handle-fn)
+   ;; 'clojure.core/fn (wrap-check-macro handle-fn)
    'if              (wrap-check-macro handle-if)
    'let             (wrap-check-macro handle-let)
    'let*            (wrap-check-macro handle-let)
@@ -426,6 +454,8 @@
 
 ;; ----------------------------------------------------------------------------------------
 
+(declare execute)
+
 ;; TODO clean up all this messy code that concerns
 ;; symbol and namespace resolution
 (defn map-impl-fn [ctx]
@@ -441,12 +471,28 @@
   [ctx]
   (next-command ctx))
 
+(defn process-create-fn
+  [{:keys [call-stack]
+    [{:keys [arities]} & _] :commands
+    :as ctx}]
+  (let [the-fn (fn [obj-name & args]
+                 (let [arg-count (count args)
+                       ks (map #(str "arg-" %) (range arg-count))
+                       kvs (into {} (map vector ks args))]
+                   (if-let [{:keys [commands] :as _metainf} (get arities arg-count)]
+                     (execute (concat [{:cmd :assoc-state :kvs kvs}] commands))
+                     (throw (ArityException. arg-count obj-name)))))]
+    (-> ctx
+        (default-update
+         [:call-stack (conj call-stack (stack-eval-result (partial the-fn (str the-fn))))]))))
+
 (defn process-invoke-fn
   [{:keys [enable-try-catch-support? throwing-ex is-throwing? is-finally? call-stack]
     [cmd & _] :commands
     :as ctx}]
   (let [arg-count (:arg-count cmd)
         [ex? result] (try
+                       ;; TODO: search local bindings for invokable fns
                        (let [return (apply (core/->impl temp-ctx (:op cmd))
                                            (map (map-impl-fn temp-ctx)
                                                 (stack-take arg-count call-stack)))]
@@ -715,6 +761,16 @@
  forms and catch/re-throws are scoped correctly as you work your way
  back up the fn call stack."
 
+(defn process-assoc-state
+  [{:keys [fn-idx] :as ctx}]
+  (let [kvs (:kvs (first (:commands ctx)))]
+    (-> ctx
+        next-command
+        (update-in [:fn-stack fn-idx :state]
+                   ;; NOTE: not sure about merging state on top of the kvs
+                   ;; seems counter-intuitive, but probably fine
+                   (partial merge kvs)))))
+
 (defn process-set-context
   [ctx]
   (let [props (:props (first (:commands ctx)))
@@ -732,6 +788,7 @@
    {:wrap-throwing? *enable-try-catch-support*}
    {:begin-form      process-no-op
     :end-form        process-no-op
+    :create-fn       process-create-fn
     :invoke-fn       process-invoke-fn
     :invoke-throw    process-invoke-throw
     :scalar          process-scalar
@@ -749,6 +806,7 @@
     :intern-var      process-no-op ;; TODO: fix
     :recur-target    process-no-op ;; TODO: fix
     ;; --------------------------------------------------------------------------
+    :assoc-state     process-assoc-state
     :set-context     process-set-context
     :test-hook       process-test-hook
     :not-implemented process-scalar}))

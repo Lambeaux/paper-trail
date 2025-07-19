@@ -533,6 +533,28 @@
           (swap! a inc)
           @a))))
 
+(deftest ^:core test-anonymous-functions
+  (forms->test "Test (fn) inside lazy sequences"
+    (map (fn [x] (inc x))
+         (filter (fn [x] (odd? x))
+                 (into (vector) (range 1 6))))
+    (map (fn [x] (range (* -1 x) x))
+         (into (vector) (range 1 6))))
+  (forms->test "Test (fn) inside realized sequences"
+    (mapv (fn [x] (inc x))
+          (filterv (fn [x] (odd? x))
+                   (into (vector) (range 1 6))))
+    (mapv (fn [x] (into [] (range (* -1 x) x)))
+          (into (vector) (range 1 6))))
+  (forms->test "Test (fn) inside (fn) inside lazy sequences"
+    (map (fn [x] (map (fn [y] (inc y)) (get x :seq)))
+         (mapv (fn [i] (hash-map :seq (range i)))
+               (range 1 6))))
+  (forms->test "Test (fn) inside (fn) inside realized sequences"
+    (mapv (fn [x] (mapv (fn [y] (inc y)) (get x :seq)))
+          (mapv (fn [i] (hash-map :seq (into (vector) (range i))))
+                (range 1 6)))))
+
 (deftest ^:core test-common-macros
   (forms->test "Test common macros from clojure.core"
     (if-not (= 1 2) :hi)
