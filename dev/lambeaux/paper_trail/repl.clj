@@ -1,5 +1,5 @@
 (ns lambeaux.paper-trail.repl
-  (:require [lambeaux.paper-trail.decomp :as ptd]))
+  (:require [lambeaux.paper-trail.decomp :as impl]))
 
 (def default-requires
   ['[lambeaux.paper-trail.repl :as r]
@@ -25,7 +25,7 @@
          (catch Exception e nil)
          (finally (swap! x inc)))))
 
-  (ptd/run-eval my-try-form))
+  (impl/run-eval my-try-form))
 
 (comment
   (require '[portal.api :as p])

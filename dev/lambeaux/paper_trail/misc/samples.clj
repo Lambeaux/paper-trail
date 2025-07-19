@@ -1,4 +1,4 @@
-(ns lambeaux.paper-trail.samples
+(ns lambeaux.paper-trail.misc.samples
   (:require [clojure.java.io :as io]
             [aero.core :as aero]))
 

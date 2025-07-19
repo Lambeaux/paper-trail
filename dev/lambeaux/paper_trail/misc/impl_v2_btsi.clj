@@ -1,9 +1,13 @@
-(ns lambeaux.paper-trail.seq
+(ns lambeaux.paper-trail.misc.impl-v2-btsi
   (:require [lambeaux.paper-trail.impl.util :as ptu]
             [lambeaux.paper-trail :as-alias pt])
   (:import [clojure.lang IObj]))
 
 (def temp-ctx {::pt/current-ns *ns*})
+
+;; ---------------------------------------------------------
+;; Bidirectional Tree Seq Interpreter
+;; ---------------------------------------------------------
 
 (defn child-seq [x]
   (let [has-children? #(if (string? %) false (seqable? %))]

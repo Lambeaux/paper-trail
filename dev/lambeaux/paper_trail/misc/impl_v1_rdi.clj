@@ -1,4 +1,4 @@
-(ns lambeaux.paper-trail.core
+(ns lambeaux.paper-trail.misc.impl-v1-rdi
   (:require [lambeaux.paper-trail.impl.util :as ptu]
             [lambeaux.paper-trail :as-alias pt]
             [clojure.repl :as repl]))
@@ -27,7 +27,7 @@
   x)
 
 ;; ---------------------------------------------------------
-;; Descendent Recursive Interpreter
+;; Recursive Descent Interpreter
 ;; ---------------------------------------------------------
 
 (declare handle-form)

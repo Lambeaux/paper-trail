@@ -1,16 +1,30 @@
-{:paths ["src" "resources"]
+{:paths ["src"]
  :deps {org.clojure/clojure        {:mvn/version "1.11.1"}
         org.clojure/java.classpath {:mvn/version "1.1.0"}
         borkdude/edamame           {:mvn/version "1.4.27"}}
- :aliases {:test {:extra-paths ["test"]
-                  :extra-deps {aero/aero
-                               {:mvn/version "1.1.6"}
-                               io.github.cognitect-labs/test-runner
+ ;; -----------------------------------------------------------------------------------------------
+ ;; Start a development repl:   clj -M:dev:cider-clj
+ ;; Run the unit tests:         clj -X:test
+ ;; -----------------------------------------------------------------------------------------------
+ :aliases {:dev {;; Dev dependencies. Some of these are just third party deps that I test
+                 ;; with, I'll be adding more as the alpha release finalizes.
+                 :extra-paths ["dev" "test" "resources"]
+                 :extra-deps {;; Tooling:
+                              org.clojure/tools.namespace {:mvn/version "1.5.0"}
+                              djblue/portal {:mvn/version "0.59.2"}
+                              ;; Good interpreter test cases:
+                              org.clojure/core.async {:mvn/version "1.8.741"}
+                              aero/aero {:mvn/version "1.1.6"}}}
+           :test {;; Test execution alias, just use 'dev' if you want repl access in order
+                  ;; to invoke the tests.
+                  :extra-paths ["test"]
+                  :extra-deps {io.github.cognitect-labs/test-runner
                                {:git/sha "7284cda41fb9edc0f3bc6b6185cfb7138fc8a023"}}
                   :main-opts ["-m" "cognitect.test-runner"]
                   :exec-fn cognitect.test-runner.api/test}
-           :cider-clj {:extra-deps {aero/aero {:mvn/version "1.1.6"}
-                                    cider/cider-nrepl {:mvn/version "0.50.2"}}
+           :cider-clj {;; Repl execution alias for IDEs that need cider middleware available
+                       ;; for CLJ (on the JVM) development.
+                       :extra-deps {cider/cider-nrepl {:mvn/version "0.50.2"}}
                        :main-opts ["-m"
                                    "nrepl.cmdline"
                                    "--middleware"
