@@ -1,4 +1,4 @@
-(ns lambeaux.paper-trail.api)
+(ns lambeaux.paper-trail.api-ideas)
 
 (defn eval*
   "Like clojure.core/eval but uses the paper-trail interpreter to produce

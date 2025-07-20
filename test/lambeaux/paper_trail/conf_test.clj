@@ -2,7 +2,7 @@
   "Conformance tests for the interpreter."
   (:require [clojure.test :as t :refer [deftest testing is]]
             [clojure.walk :as w]
-            [lambeaux.paper-trail.impl.executor :as impl]
+            [lambeaux.paper-trail.impl.core :as impl]
             [lambeaux.paper-trail :as-alias pt])
   (:import  [clojure.lang ExceptionInfo Atom]
             [java.io IOException]))
@@ -109,12 +109,12 @@
                   ;; the form, the test results might be skewed.
                   `(testing (str '~form)
                      (is (= (wrap* (capture-result (eval '~form)))
-                            (wrap* (capture-result (impl/run-eval '~form)))))))
+                            (wrap* (capture-result (impl/evaluate '~form)))))))
                 forms))))
 
 (defn compare-eval*
   [& forms]
-  (let [handlers [`eval `impl/run-eval]
+  (let [handlers [`eval `impl/evaluate]
         test-cases (for [handler-sym handlers form forms]
                      {:handler handler-sym :input form})]
     (mapv (fn [{:keys [handler input] :as tcase}]

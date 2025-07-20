@@ -1,10 +1,12 @@
 (ns lambeaux.paper-trail.repl
-  (:require [lambeaux.paper-trail.impl.executor :as impl]))
+  (:require [lambeaux.paper-trail.impl.core :as impl]))
 
 (def default-requires
   ['[lambeaux.paper-trail.repl :as r]
-   '[lambeaux.paper-trail.classpath :as cp]
-   '[lambeaux.paper-trail.impl.executor :as impl]])
+   '[lambeaux.paper-trail.impl.core :as impl]
+   '[lambeaux.paper-trail.impl.generator :as ptg]
+   '[lambeaux.paper-trail.impl.executor :as pte]
+   '[lambeaux.paper-trail.classpath :as cp]])
 
 (defn require-pt
   []
@@ -25,7 +27,7 @@
          (catch Exception e nil)
          (finally (swap! x inc)))))
 
-  (impl/run-eval my-try-form))
+  (impl/evaluate my-try-form))
 
 (comment
   (require '[portal.api :as p])
