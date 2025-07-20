@@ -1,7 +1,7 @@
-(ns lambeaux.paper-trail.decomp
-  (:require [lambeaux.paper-trail.impl.generator :as ptg]
+(ns lambeaux.paper-trail.impl.executor
+  (:require [clojure.set :as set]
+            [lambeaux.paper-trail.impl.generator :as ptg]
             [lambeaux.paper-trail.impl.util :as ptu]
-            [clojure.set :as set]
             [lambeaux.paper-trail :as-alias pt])
   (:import [clojure.lang IObj IPending LazySeq ArityException]))
 

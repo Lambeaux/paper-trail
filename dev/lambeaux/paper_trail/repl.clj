@@ -1,10 +1,10 @@
 (ns lambeaux.paper-trail.repl
-  (:require [lambeaux.paper-trail.decomp :as impl]))
+  (:require [lambeaux.paper-trail.impl.executor :as impl]))
 
 (def default-requires
   ['[lambeaux.paper-trail.repl :as r]
    '[lambeaux.paper-trail.classpath :as cp]
-   '[lambeaux.paper-trail.decomp :as impl]])
+   '[lambeaux.paper-trail.impl.executor :as impl]])
 
 (defn require-pt
   []

@@ -2,7 +2,7 @@
   "Conformance tests for the interpreter."
   (:require [clojure.test :as t :refer [deftest testing is]]
             [clojure.walk :as w]
-            [lambeaux.paper-trail.decomp :as impl]
+            [lambeaux.paper-trail.impl.executor :as impl]
             [lambeaux.paper-trail :as-alias pt])
   (:import  [clojure.lang ExceptionInfo Atom]
             [java.io IOException]))
