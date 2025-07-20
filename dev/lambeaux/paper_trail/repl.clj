@@ -5,8 +5,7 @@
   ['[lambeaux.paper-trail.repl :as r]
    '[lambeaux.paper-trail.impl.core :as impl]
    '[lambeaux.paper-trail.impl.generator :as ptg]
-   '[lambeaux.paper-trail.impl.executor :as pte]
-   '[lambeaux.paper-trail.classpath :as cp]])
+   '[lambeaux.paper-trail.impl.executor :as pte]])
 
 (defn require-pt
   []

@@ -1,5 +1,5 @@
-(ns lambeaux.paper-trail.interop
-  (:require [lambeaux.paper-trail.interop-proto :as proto]
+(ns lambeaux.paper-trail.wip.interop
+  (:require [lambeaux.paper-trail.wip.interop-proto :as proto]
             [lambeaux.paper-trail :as-alias pt]))
 
 ;; ----------------------------------------------------------------------------------------
@@ -106,11 +106,11 @@
     clojure.lang.IFn
     clojure.lang.Fn})
 
-(defcallable SourceFetchFn  []
+(defcallable SourceFetchFn []
   proto/InterpretedFn
   (call [this args] {:type (type this) :args args}))
 
-(defcallable SourceCachedFn  []
+(defcallable SourceCachedFn []
   proto/InterpretedFn
   (call [_this _args] (throw (ex-info "Not implemented" {}))))
 

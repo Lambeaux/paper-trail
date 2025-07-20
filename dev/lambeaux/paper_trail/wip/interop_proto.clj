@@ -1,4 +1,4 @@
-(ns lambeaux.paper-trail.interop-proto)
+(ns lambeaux.paper-trail.wip.interop-proto)
 
 (defprotocol InterpretedFn
   "Paper Trail's function abstraction."

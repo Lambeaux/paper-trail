@@ -1,4 +1,4 @@
-(ns lambeaux.paper-trail.classpath
+(ns lambeaux.paper-trail.wip.classpath
   (:require [clojure.java.classpath :as jc]
             [clojure.string :as str]
             [clojure.java.io :as io]
