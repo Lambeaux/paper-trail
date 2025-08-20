@@ -307,8 +307,9 @@
    'try             (wrap-check-macro handle-try-catch-finally)
    'catch           (constantly nil)
    'finally         (constantly nil)
-   :type/list-fn    (wrap-check-macro handle-invoke)
-   :type/list-macro (wrap-check-macro handle-macro)})
+   :type/macro      (wrap-check-macro handle-macro)
+   :type/list       (wrap-check-macro handle-invoke)
+   :type/cons       (wrap-check-macro handle-invoke)})
 
 (defn form->commands
   [attrs form]

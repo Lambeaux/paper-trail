@@ -33,6 +33,14 @@
   (swap! logs conj [:spy label x])
   x)
 
+(defn terminal? [obj]
+  (or (keyword? obj)
+      (number? obj)
+      (boolean? obj)
+      (nil? obj)
+      (char? obj)
+      (string? obj)))
+
 ;; ---------------------------------------------------------
 ;; Recursive Descent Interpreter
 ;; ---------------------------------------------------------
@@ -102,7 +110,7 @@
       (and (symbol? form)
            (contains? arg-map form)) (assoc ctx :value (spy :argmap (arg-map form)))
       (ptu/accessible-fn? ctx form) (assoc ctx :value form)
-      (ptu/terminal? form) (assoc ctx :value form)
+      (terminal? form) (assoc ctx :value form)
       :else (throw (ex-info "Unknown handle-form case" (assoc ctx :err-form form))))
     (catch clojure.lang.ExceptionInfo ei
       (throw ei))

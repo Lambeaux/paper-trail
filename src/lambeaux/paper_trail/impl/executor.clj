@@ -28,6 +28,44 @@
 
 ;; ----------------------------------------------------------------------------------------
 
+(def ^:dynamic *enable-try-catch-support* true)
+
+(defn new-call-ctx
+  ([]
+   (new-call-ctx :fn-in-execute nil))
+  ([exec-ctx]
+   (new-call-ctx :fn-on-stack exec-ctx))
+  ([call-type exec-ctx]
+   {:call-type call-type
+    :exec-ctx (when (= :fn-on-stack call-type)
+                (assert (map? exec-ctx) "exec-ctx must be a map")
+                exec-ctx)}))
+
+(defn new-fn-ctx
+  [commands]
+  {:commands commands
+   :command-history (list)
+   ;; :call-stack (list) ;; (added with middleware)
+   :call-stack-primary (list)
+   :call-stack-finally (list)
+   :finally-depth 0
+   :source-scope {}
+   :impl-scope {}
+   :state {}})
+
+(defn new-exec-ctx
+  [commands]
+  {:fn-idx 0
+   :cmd-counter (atom -1)
+   :fn-stack [(new-fn-ctx commands)]
+   :try-handlers (list)
+   :is-throwing? false
+   :is-finally? false
+   :throwing-ex nil
+   :enable-try-catch-support? *enable-try-catch-support*})
+
+;; ----------------------------------------------------------------------------------------
+
 (comment
   "TODO (Later): Come back and revisit some cases regarding 'apply'"
   ;; does not use varadic
@@ -126,6 +164,47 @@
 
 ;; ----------------------------------------------------------------------------------------
 
+(defn push-fn-stack
+  [{:keys [fn-idx fn-stack] :as ctx} commands]
+  (assoc ctx :fn-idx (inc fn-idx) :fn-stack (conj fn-stack (new-fn-ctx commands))))
+
+(defn pop-fn-stack*
+  [{:keys [fn-idx fn-stack] :as ctx}]
+  (assoc ctx :fn-idx (dec fn-idx) :fn-stack (pop fn-stack)))
+
+;; todo: create a proper stack abstraction so this code copied from the middleware is no longer
+;; necessary; the issue here is once we pop-fn-stack, we're now on a fn-idx that hasn't been augmented
+;; with convenience bindings + other middleware housekeeping, so we have to handle things the verbose way
+(defn convey-result
+  [{:keys [fn-idx] :as ctx} result]
+  (let [{:keys [call-stack-primary call-stack-finally finally-depth]} (get-in ctx [:fn-stack fn-idx])
+        [stack-name stack-to-use] (if (zero? finally-depth)
+                                    [:call-stack-primary call-stack-primary]
+                                    [:call-stack-finally call-stack-finally])
+        new-stack (conj stack-to-use (stack-eval-result result))]
+    (default-update
+     ctx false [:call-stack new-stack stack-name new-stack])))
+
+;; todo: this call occurs outside command handlers, so we also have no middleware benefits for this fn
+(defn pop-fn-stack
+  [{:keys [fn-idx throwing-ex is-throwing?] :as ctx}]
+  (let [{:keys [call-stack-primary call-stack-finally finally-depth]} (get-in ctx [:fn-stack fn-idx])
+        [_ stack-to-use] (if (zero? finally-depth)
+                           [:call-stack-primary call-stack-primary]
+                           [:call-stack-finally call-stack-finally])]
+    (if (zero? fn-idx)
+      (if is-throwing?
+        (throw throwing-ex)
+        (stack-peek stack-to-use))
+      (if is-throwing?
+        (pop-fn-stack* ctx)
+        (let [return (stack-peek stack-to-use)]
+          (-> ctx
+              (pop-fn-stack*)
+              (convey-result return)))))))
+
+;; ----------------------------------------------------------------------------------------
+
 (declare execute)
 
 ;; TODO clean up all this messy code that concerns
@@ -137,35 +216,60 @@
       ;; swallowed by accessible-fn? and ->impl
       (instance? LazySeq arg) arg
       (ptu/accessible-fn? ctx arg) (ptu/->impl ctx arg)
+      ;; note: temporary limitation: for now, fns passed as arguments must be invoked 
+      ;; as fn-in-execute and not as fn-on-stack, because return vals are expected, not
+      ;; returned context
+      (and (fn? arg) (::pt/fn-impl (meta arg))) (partial arg (new-call-ctx))
       :else arg)))
 
 (defn process-no-op
   [ctx]
   (next-command ctx))
 
+(defn copy-scope-cmds
+  ([keyvals]
+   (copy-scope-cmds false keyvals))
+  ([impl? keyvals]
+   (map (fn [[k v]]
+          {:cmd :bind-name
+           :bind-id k
+           :bind-from :command-value
+           :value (peek v)
+           :impl? impl?})
+        (seq keyvals))))
+
 (defn process-create-fn
-  [{:keys [call-stack]
+  [{:keys [call-stack source-scope impl-scope]
     [{:keys [arities]} & _] :commands
     :as ctx}]
-  (let [the-fn (fn [obj-name & args]
-                 (let [arg-count (count args)
-                       ks (map #(str "arg-" %) (range arg-count))
-                       kvs (into {} (map vector ks args))]
-                   (if-let [{:keys [commands] :as _metainf} (get arities arg-count)]
-                     (execute (concat [{:cmd :assoc-state :kvs kvs}] commands))
-                     (throw (ArityException. arg-count obj-name)))))]
+  (let [the-fn (let [scope-cmds (concat
+                                 (copy-scope-cmds source-scope)
+                                 (copy-scope-cmds true impl-scope))]
+                 (fn [obj-name {:keys [call-type exec-ctx]} & args]
+                   (let [arg-count (count args)
+                         ks (map #(str "arg-" %) (range arg-count))
+                         kvs (into {} (map vector ks args))]
+                     (if-let [{:keys [commands] :as _metainf} (get arities arg-count)]
+                       (let [all-cmds (concat [{:cmd :assoc-state :kvs kvs}] scope-cmds commands)]
+                         (case call-type
+                           :fn-in-execute (execute all-cmds)
+                           :fn-on-stack   (push-fn-stack exec-ctx all-cmds)))
+                       (throw (ArityException. arg-count obj-name))))))
+        the-fn* (with-meta (partial the-fn (str the-fn))
+                  {::pt/fn-impl true})]
     (-> ctx
         (default-update
-         [:call-stack (conj call-stack (stack-eval-result (partial the-fn (str the-fn))))]))))
+         [:call-stack (conj call-stack (stack-eval-result the-fn*))]))))
 
-(defn process-invoke-fn
-  [{:keys [enable-try-catch-support? throwing-ex is-throwing? is-finally? call-stack]
+(defn invoke-opaque-fn
+  [{:keys [throwing-ex is-throwing? is-finally? call-stack]
     [cmd & _] :commands
-    :as ctx}]
+    :as ctx}
+   fn-impl]
   (let [arg-count (:arg-count cmd)
         [ex? result] (try
                        ;; TODO: search local bindings for invokable fns
-                       (let [return (apply (ptu/->impl temp-ctx (:op cmd))
+                       (let [return (apply fn-impl
                                            (map (map-impl-fn temp-ctx)
                                                 (stack-take arg-count call-stack)))]
                          ;; [false (if-not (seq? return) return (doall return))]
@@ -183,8 +287,6 @@
                                        (::pt/raw-form (meta arg)))
                                   arg))
                             (stack-take arg-count call-stack))]
-    (when (and ex? (not enable-try-catch-support?))
-      (throw result))
     (-> ctx
         (assoc
          :is-throwing? (boolean (or is-throwing? ex?))
@@ -193,6 +295,25 @@
         (default-update
          [:call-stack (conj (apply list (drop arg-count call-stack))
                             (stack-eval-result result))]))))
+
+(defn invoke-interpreted-fn
+  [{:keys [call-stack] [cmd & _] :commands :as ctx} fn-impl]
+  (let [arg-count (:arg-count cmd)]
+    (apply fn-impl
+           (new-call-ctx
+            (default-update ctx [:call-stack (apply list (drop arg-count call-stack))]))
+           (map (map-impl-fn temp-ctx) (stack-take arg-count call-stack)))))
+
+(defn process-invoke-fn
+  [{:keys [source-scope impl-scope] [cmd & _] :commands :as ctx}]
+  (let [fn-symbol (:op cmd)
+        fn-impl   (or (peek (get source-scope fn-symbol))
+                      (peek (get impl-scope fn-symbol))
+                      (ptu/->impl temp-ctx fn-symbol))
+        pt-fn?    (boolean (::pt/fn-impl (meta fn-impl)))]
+    (if pt-fn?
+      (invoke-interpreted-fn ctx fn-impl)
+      (invoke-opaque-fn ctx fn-impl))))
 
 (defn process-invoke-throw
   [{:keys [enable-try-catch-support? call-stack]
@@ -367,10 +488,13 @@
                             (assoc-in [:fn-stack fn-idx :call-stack] stack-to-use)))
           ;; todo: fix stack writes for better parity
           ;; modified-stack (:call-stack ctx*)
-          modified-stack (get-in ctx* [:fn-stack fn-idx :call-stack])]
-      (-> ctx*
-          (dissoc :call-stack)
-          (assoc-in [:fn-stack fn-idx stack-name] modified-stack)))))
+          ;; -------------------------
+          ;; todo: it's possible, if the fn-stack was pushed/popped, that modified-stack is nil
+          modified-stack (get-in ctx* [:fn-stack fn-idx :call-stack])
+          ctx** (dissoc ctx* :call-stack)]
+      (if-not modified-stack
+        ctx**
+        (assoc-in ctx** [:fn-stack fn-idx stack-name] modified-stack)))))
 
 (defn wrap-check-not-infinite
   [handler]
@@ -404,14 +528,14 @@
 
 (defn wrap-command-middleware
   ([handler]
-   (wrap-command-middleware false handler))
-  ([wrap-throwing? handler]
+   (wrap-command-middleware true handler))
+  ([_wrap-throwing? handler]
    (cond-> handler
-     wrap-throwing? wrap-throwing
-     true           wrap-call-stack
-     true           wrap-check-not-infinite
-     true           wrap-convenience-mappings
-     true           wrap-uncaught-ex)))
+     true wrap-throwing
+     true wrap-call-stack
+     true wrap-check-not-infinite
+     true wrap-convenience-mappings
+     true wrap-uncaught-ex)))
 
 (defn inject-command-middleware
   [{:keys [wrap-throwing?] :as _opts} all-handlers]
@@ -422,8 +546,6 @@
           (keys all-handlers)))
 
 ;; ----------------------------------------------------------------------------------------
-
-(def ^:dynamic *enable-try-catch-support* true)
 
 "TODO: When 'throwing?' -- we only care about:
  ** unbind-name
@@ -457,7 +579,7 @@
 (defn create-command-handlers
   []
   (inject-command-middleware
-   {:wrap-throwing? *enable-try-catch-support*}
+   {}
    {:begin-form      process-no-op
     :end-form        process-no-op
     :create-fn       process-create-fn
@@ -495,29 +617,11 @@
                       [test-hook (last cmds)])]
     (execute cmds*)))
 
-(defn new-fn-ctx
-  [commands]
-  {:commands commands
-   :command-history (list)
-   ;; :call-stack (list) ;; (added with middleware)
-   :call-stack-primary (list)
-   :call-stack-finally (list)
-   :finally-depth 0
-   :source-scope {}
-   :impl-scope {}
-   :state {}})
-
-(defn new-exec-ctx
-  [commands]
-  {:fn-idx 0
-   :cmd-counter (atom -1)
-   :fn-stack [(new-fn-ctx commands)]
-   :try-handlers (list)
-   :is-throwing? false
-   :is-finally? false
-   :throwing-ex nil
-   :enable-try-catch-support? *enable-try-catch-support*})
-
+;; also consider wrapping exceptions we know should be thrown inside
+;; ex-info's with attached metadata, then wrap the entire interpreter
+;; process with something like wrap-uncaught-ex but forward any wrapped
+;; exception accordingly since they don't count as 'interpreter errors'
+;; (maybe make a deftype for internal interpreter errors/exceptions)
 (defn execute
   ([commands]
    (execute commands nil))
@@ -529,26 +633,18 @@
          command-handlers (create-command-handlers)
          commands* commands
          ctx* (new-exec-ctx commands*)]
-     (loop [{:keys [cmd-counter throwing-ex is-throwing? fn-idx] :as ctx} ctx*]
-       (let [{:keys [commands call-stack] :as _fctx} (get-in ctx [:fn-stack fn-idx])
+     (loop [{:keys [cmd-counter fn-idx] :as ctx} ctx*]
+       (let [{:keys [commands] :as _fctx} (get-in ctx [:fn-stack fn-idx])
              ;; _ (println (pr-str (first command-history)))
              idx (inc @cmd-counter)
              h (get command-handlers (:cmd (first commands)))]
-         (if (stop-early? idx)
-           ctx
-           (if h
-             (recur (h ctx))
-             (if is-throwing?
-               ;; todo: when you support drilling down into function calls, fix
-               ;; this to pop fns off the fn-stack and only throw when none remain
-               ;; ---
-               ;; also consider wrapping exceptions we know should be thrown inside
-               ;; ex-info's with attached metadata, then wrap the entire interpreter
-               ;; process with something like wrap-uncaught-ex but forward any wrapped
-               ;; exception accordingly since they don't count as 'interpreter errors'
-               ;; (maybe make a deftype for internal interpreter errors/exceptions)
-               (throw throwing-ex)
-               (stack-peek call-stack)))))))))
+         (cond
+           ;; todo: when you support drilling down into function calls, fix
+           ;; this to pop fns off the fn-stack and only throw when none remain
+           (stop-early? idx) ctx
+           h                 (recur (h ctx))
+           (> fn-idx 0)      (recur (pop-fn-stack ctx))
+           :else             (pop-fn-stack ctx)))))))
 
 (defn get-fctx
   [context]

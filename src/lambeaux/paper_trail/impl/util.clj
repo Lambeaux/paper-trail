@@ -68,31 +68,67 @@
 (defn map-impl-fn [ctx]
   #(if (accessible-fn? ctx %) (->impl ctx %) %))
 
-(defn terminal? [obj]
-  (or (keyword? obj)
-      (number? obj)
-      (boolean? obj)
-      (nil? obj)
-      (char? obj)
-      (string? obj)))
-
 ;; ----------------------------------------------------------------------------
 
 (def temp-ctx {::pt/current-ns *ns*})
+
+(comment ;; Some ideas for the form hierarchy, but not necessary right now
+  ;; Including all leaf nodes in the generator.clj dispatch map is sufficient
+
+  (def type->childtypes
+    {:type/form
+     [:type/scalar :type/composite]
+     :type/scalar
+     [:type/string :type/number :type/boolean :type/char :type/nil :type/fn :type/class :type/ident]
+     :type/ident
+     [:type/symbol :type/keyword]
+     :type/symbol
+     [:type/symbol-simple :type/symbol-qual]
+     :type/keyword
+     [:type/keyword-simple :type/keyword-qual]
+     :type/composite
+     [:type/map :type/vector :type/set :type/invokable :type/seq]
+     :type/invokable
+     [:type/macro :type/list :type/cons]})
+
+  (defn create-form-hierarchy
+    []
+    (reduce (fn [h* [parent child]]
+              (derive h* child parent))
+            (make-hierarchy)
+            (->> (seq type->childtypes)
+                 (map (fn [[k coll]] (map vector (repeat k) coll)))
+                 (apply concat))))
+
+  ;;;; Form type hierarchy ;;;;
+  (defonce fth (create-form-hierarchy)))
+
+;; ----------------------------------------------------------------------------
+;; Form Classification
+;; ----------------------------------------------------------------------------
+
+(defn macro-type
+  "Returns the macro type when invokable form x is a macro, else nil."
+  [x]
+  (let [op (first x)]
+    (when (accessible-macro? temp-ctx op)
+      :type/macro)))
 
 ;; - Use symbols to represent literals in a dispatch map ('let, 'try, etc)
 ;; - Use keywords to represent types in a dispatch map (:list, :vector, :map, etc)
 ;; - Use multi-methods to arrive at the key when preds are needed??
 ;; - Use a map to arrive at dispatch keywords??
 
-(defn classify [x]
+(defn classify
+  "Returns a type keyword used for generating commands for input forms."
+  [x]
   (cond (string? x)            :type/string
         (number? x)            :type/number
         (boolean? x)           :type/boolean
         (char? x)              :type/char
-        (class? x)             :type/class
-        (fn? x)                :type/fn
         (nil? x)               :type/nil
+        (fn? x)                :type/fn
+        (class? x)             :type/class
         (simple-keyword? x)    :type/keyword-simple
         (simple-symbol? x)     :type/symbol-simple
         (qualified-keyword? x) :type/keyword-qual
@@ -100,14 +136,8 @@
         (map? x)               :type/map
         (vector? x)            :type/vector
         (set? x)               :type/set
-        (list? x)              (let [op (first x)]
-                                 (cond (accessible-macro? temp-ctx op) :type/list-macro
-                                       (accessible-fn? temp-ctx op) :type/list-fn
-                                       :else :type/list-literal))
-        (instance? Cons x)     (let [op (first x)]
-                                 (cond (accessible-macro? temp-ctx op) :type/list-macro
-                                       (accessible-fn? temp-ctx op) :type/list-fn
-                                       :else :type/cons))
+        (list? x)              (or (macro-type x) :type/list)
+        (instance? Cons x)     (or (macro-type x) :type/cons)
         (seq? x)               :type/seq
         :else (throw (ex-info (str "Type " (type x) " is unknown for value: " x)
                               {:value x :type (type x)}))))
