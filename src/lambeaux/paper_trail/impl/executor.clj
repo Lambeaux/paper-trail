@@ -48,6 +48,7 @@
    ;; :call-stack (list) ;; (added with middleware)
    :call-stack-primary (list)
    :call-stack-finally (list)
+   :form-depth -1
    :finally-depth 0
    :source-scope {}
    :impl-scope {}
@@ -102,31 +103,36 @@
 
 ;; ----------------------------------------------------------------------------------------
 
-;; (defrecord Unrealized [wrapped-value])
+(defn container-type [this] (. this containerType))
+(defn container-value [this] (. this containerValue))
+(defn container-meta [this] (. this containerMeta))
 
-(deftype Unrealized [theWrappedVal theValsMetadata]
-  ;; IPending (??)
-  ;; (isRealized [this])
+(deftype Container [containerType containerValue containerMeta]
   IObj
-  (meta [this] (. this theValsMetadata))
-  (withMeta [this m] (new Unrealized (. this theWrappedVal) m)))
+  (meta [this]
+    (container-meta this))
+  (withMeta [this m]
+    (new Container (container-type this) (container-value this) m)))
 
-(defmethod print-method Unrealized
+(defn new-container
+  ([cv] (new-container nil cv))
+  ([ct cv] (new Container ct cv nil)))
+
+(defmethod print-method Container
   [this writer]
-  (let [class-str (.getName (class (. this theWrappedVal)))]
-    (.write writer (str "#unrealized[" class-str "]"))))
+  (let [class-str (.getName (class (container-value this)))]
+    (.write writer (case (container-type this)
+                     :unrealized (str "#unrealized[" class-str "]")
+                     :unhandled  (str "#unhandled[" class-str "]")
+                     (str "#container[" (container-value this) "]")))))
 
-(defn val->unrealized
-  [v]
-  (new Unrealized v nil))
-
-(defn unrealized->val
-  [u]
-  (. u theWrappedVal))
+(defn val->unrealized [v] (new-container :unrealized v))
+(defn val->unhandled [v] (new-container :unhandled v))
 
 (defn realized-val?
   [val*]
-  (if (instance? Unrealized val*)
+  (if (and (instance? Container val*)
+           (= :unrealized (container-type val*)))
     false
     (if-not (instance? IPending val*)
       true
@@ -134,9 +140,9 @@
 
 (defn stack-unwrap-val
   [val*]
-  (if-not (instance? Unrealized val*)
+  (if-not (instance? Container val*)
     val*
-    (unrealized->val val*)))
+    (container-value val*)))
 
 (defn stack-peek
   [call-stack]
@@ -144,7 +150,7 @@
 
 (defn stack-take
   [n call-stack]
-  (map stack-unwrap-val (take n call-stack)))
+  (map stack-unwrap-val (reverse (take n call-stack))))
 
 (defn assoc-meta
   "Like 'assoc' but operates on obj's metadata."
@@ -157,10 +163,30 @@
      (vary-meta obj f))))
 
 (defn stack-eval-result
-  [result]
-  (cond-> result
-    (not (realized-val? result)) (val->unrealized)
-    (instance? IObj result)      (assoc-meta ::pt/is-evaled? true)))
+  [depth result]
+  (let [total-meta (merge {::pt/is-evaled? true :form-depth depth} (meta result))]
+    (with-meta
+      (cond
+        (not (realized-val? result)) (val->unrealized result)
+        (instance? Exception result) (val->unhandled result)
+        :else (new-container result))
+      total-meta)))
+
+(defn stack-filter-stale-args
+  [call-stack depth]
+  (apply list (filter #(>= depth (:form-depth (meta %))) call-stack)))
+
+(defn stack-drop-args
+  [call-stack arg-count]
+  (apply list (drop arg-count call-stack)))
+
+(defn stack-push-result
+  [call-stack depth result]
+  (conj call-stack (stack-eval-result depth result)))
+
+(defn stack-resolve
+  [call-stack depth arg-count result]
+  (stack-push-result (stack-drop-args call-stack arg-count) depth result))
 
 ;; ----------------------------------------------------------------------------------------
 
@@ -176,12 +202,12 @@
 ;; necessary; the issue here is once we pop-fn-stack, we're now on a fn-idx that hasn't been augmented
 ;; with convenience bindings + other middleware housekeeping, so we have to handle things the verbose way
 (defn convey-result
-  [{:keys [fn-idx] :as ctx} result]
+  [{:keys [form-depth fn-idx] :as ctx} result]
   (let [{:keys [call-stack-primary call-stack-finally finally-depth]} (get-in ctx [:fn-stack fn-idx])
         [stack-name stack-to-use] (if (zero? finally-depth)
                                     [:call-stack-primary call-stack-primary]
                                     [:call-stack-finally call-stack-finally])
-        new-stack (conj stack-to-use (stack-eval-result result))]
+        new-stack (stack-push-result stack-to-use form-depth result)]
     (default-update
      ctx false [:call-stack new-stack stack-name new-stack])))
 
@@ -239,7 +265,7 @@
         (seq keyvals))))
 
 (defn process-create-fn
-  [{:keys [call-stack source-scope impl-scope]
+  [{:keys [form-depth call-stack source-scope impl-scope]
     [{:keys [arities]} & _] :commands
     :as ctx}]
   (let [the-fn (let [scope-cmds (concat
@@ -259,10 +285,10 @@
                   {::pt/fn-impl true})]
     (-> ctx
         (default-update
-         [:call-stack (conj call-stack (stack-eval-result the-fn*))]))))
+         [:call-stack (stack-push-result call-stack form-depth the-fn*)]))))
 
 (defn invoke-opaque-fn
-  [{:keys [throwing-ex is-throwing? is-finally? call-stack]
+  [{:keys [form-depth throwing-ex is-throwing? is-finally? call-stack]
     [cmd & _] :commands
     :as ctx}
    fn-impl]
@@ -293,15 +319,14 @@
          :is-finally? (if ex? false is-finally?)
          :throwing-ex (if ex? result throwing-ex))
         (default-update
-         [:call-stack (conj (apply list (drop arg-count call-stack))
-                            (stack-eval-result result))]))))
+         [:call-stack (stack-resolve call-stack form-depth arg-count result)]))))
 
 (defn invoke-interpreted-fn
   [{:keys [call-stack] [cmd & _] :commands :as ctx} fn-impl]
   (let [arg-count (:arg-count cmd)]
     (apply fn-impl
            (new-call-ctx
-            (default-update ctx [:call-stack (apply list (drop arg-count call-stack))]))
+            (default-update ctx [:call-stack (stack-drop-args call-stack arg-count)]))
            (map (map-impl-fn temp-ctx) (stack-take arg-count call-stack)))))
 
 (defn process-invoke-fn
@@ -316,19 +341,16 @@
       (invoke-opaque-fn ctx fn-impl))))
 
 (defn process-invoke-throw
-  [{:keys [enable-try-catch-support? call-stack]
-    :as ctx}]
-  (when-not enable-try-catch-support?
-    (throw (stack-peek call-stack)))
+  [{:keys [call-stack] :as ctx}]
   (-> ctx
-      (next-command)
       (assoc
        :is-throwing? true
        :is-finally? false
-       :throwing-ex (stack-peek call-stack))))
+       :throwing-ex (stack-peek call-stack))
+      (default-update [:call-stack (pop call-stack)])))
 
 (defn process-scalar
-  [{:keys [call-stack source-scope impl-scope]
+  [{:keys [form-depth call-stack source-scope impl-scope]
     [cmd & _] :commands
     :as ctx}]
   (let [scalar-form (:form cmd)
@@ -339,7 +361,7 @@
                        ::pt/nil nil
                        ::pt/false false
                        scalar-value)]
-    (default-update ctx [:call-stack (conj call-stack (stack-eval-result scalar-value))])))
+    (default-update ctx [:call-stack (stack-push-result call-stack form-depth scalar-value)])))
 
 ;; ----------------------------------------------------------------------------------------
 
@@ -347,6 +369,7 @@
   [{:keys [call-stack state]
     [cmd & _] :commands
     :as ctx}]
+  ;; todo: should we pop the call-stack in this scenario?
   (default-update ctx [:state (assoc state (:state-id cmd) (stack-peek call-stack))]))
 
 (defn process-bind-name
@@ -366,7 +389,9 @@
         keyval-pairs (if impl?
                        [:impl-scope (update impl-scope bind-id #(conj % val-to-bind))]
                        [:source-scope (update source-scope bind-id #(conj % val-to-bind))])]
-    (default-update ctx keyval-pairs)))
+    (default-update ctx (if (not= :call-stack bind-from)
+                          keyval-pairs
+                          (conj keyval-pairs :call-stack (pop call-stack))))))
 
 (defn process-unbind-name
   [{:keys [source-scope impl-scope]
@@ -445,18 +470,25 @@
                           (select-keys cmd [:id :catches :finally]))))))
 
 (defn process-cleanup-try
-  [{:keys [is-throwing? throwing-ex try-handlers]
+  [{:keys [form-depth is-throwing? throwing-ex try-handlers call-stack state]
     [_ & cmds] :commands
     :as ctx}]
   (let [{:keys [catches] finally-commands :finally} (peek try-handlers)
         catch-commands (find-catch throwing-ex catches)
-        still-throwing? (boolean (when is-throwing? (not catch-commands)))]
+        still-throwing? (boolean (when is-throwing? (not catch-commands)))
+        ex-caught? (boolean (and is-throwing? (not still-throwing?)))]
     (-> ctx
-        (assoc
-         :is-throwing? still-throwing?
-         :try-handlers (pop try-handlers)
-         :throwing-ex (when still-throwing? throwing-ex))
-        (default-update [:commands (concat catch-commands finally-commands cmds)]))))
+        (assoc :is-throwing? still-throwing?
+               :try-handlers (pop try-handlers)
+               :throwing-ex (when still-throwing? throwing-ex))
+        (default-update [:commands (concat catch-commands finally-commands cmds)
+                         :state    (if-not ex-caught?
+                                     state
+                                     ;; note: wanted to wrap the ex in a val->unhandled
+                                     (assoc state :caught-ex throwing-ex))
+                         :call-stack (if-not ex-caught?
+                                       call-stack
+                                       (stack-filter-stale-args call-stack form-depth))]))))
 
 (defn process-finally
   [{:keys [fn-idx commands] :as ctx}]
@@ -555,6 +587,14 @@
  forms and catch/re-throws are scoped correctly as you work your way
  back up the fn call stack."
 
+(defn process-begin-form
+  [{:keys [form-depth] :as ctx}]
+  (default-update ctx [:form-depth (inc form-depth)]))
+
+(defn process-end-form
+  [{:keys [form-depth] :as ctx}]
+  (default-update ctx [:form-depth (dec form-depth)]))
+
 (defn process-assoc-state
   [{:keys [fn-idx] :as ctx}]
   (let [kvs (:kvs (first (:commands ctx)))]
@@ -580,8 +620,8 @@
   []
   (inject-command-middleware
    {}
-   {:begin-form      process-no-op
-    :end-form        process-no-op
+   {:begin-form      process-begin-form
+    :end-form        process-end-form
     :create-fn       process-create-fn
     :invoke-fn       process-invoke-fn
     :invoke-throw    process-invoke-throw

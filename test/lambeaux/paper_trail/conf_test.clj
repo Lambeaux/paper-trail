@@ -458,6 +458,8 @@
       (let [int-atom (atom 1)
             vec-val (map str (vector 1 2 3 4 5))
             result (try
+                     ;; todo: need to test when ex's happen on earlier arg
+                     ;; the (into) destination '[]' instead of the source seq
                      (into [] (try
                                 (filter odd? (mapv inc vec-val))
                                 (catch ClassCastException _cce [:inner-error])

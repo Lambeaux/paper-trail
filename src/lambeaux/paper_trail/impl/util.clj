@@ -9,6 +9,14 @@
   (:require [lambeaux.paper-trail :as-alias pt])
   (:import [clojure.lang Cons]))
 
+(defn counter-fn
+  "Returns a no-arg fn that returns the next integer in a ever-increasing
+   sequence of integers, starting at 0."
+  []
+  (let [state* (atom -1)]
+    (fn []
+      (swap! state* inc))))
+
 ;; ----------------------------------------------------------------------------
 ;; Predicates / Resolvers
 ;; ----------------------------------------------------------------------------
