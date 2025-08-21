@@ -174,7 +174,10 @@
 
 (defn stack-filter-stale-args
   [call-stack depth]
-  (apply list (filter #(>= depth (:form-depth (meta %))) call-stack)))
+  (apply list
+         (first call-stack)
+         (filter #(> depth (:form-depth (meta %)))
+                 (rest call-stack))))
 
 (defn stack-drop-args
   [call-stack arg-count]
@@ -470,7 +473,7 @@
                           (select-keys cmd [:id :catches :finally]))))))
 
 (defn process-cleanup-try
-  [{:keys [form-depth is-throwing? throwing-ex try-handlers call-stack state]
+  [{:keys [is-throwing? throwing-ex try-handlers state]
     [_ & cmds] :commands
     :as ctx}]
   (let [{:keys [catches] finally-commands :finally} (peek try-handlers)
@@ -485,10 +488,7 @@
                          :state    (if-not ex-caught?
                                      state
                                      ;; note: wanted to wrap the ex in a val->unhandled
-                                     (assoc state :caught-ex throwing-ex))
-                         :call-stack (if-not ex-caught?
-                                       call-stack
-                                       (stack-filter-stale-args call-stack form-depth))]))))
+                                     (assoc state :caught-ex throwing-ex))]))))
 
 (defn process-finally
   [{:keys [fn-idx commands] :as ctx}]
@@ -592,8 +592,11 @@
   (default-update ctx [:form-depth (inc form-depth)]))
 
 (defn process-end-form
-  [{:keys [form-depth] :as ctx}]
-  (default-update ctx [:form-depth (dec form-depth)]))
+  [{:keys [form-depth is-throwing? call-stack] :as ctx}]
+  (default-update ctx [:form-depth (dec form-depth)
+                       :call-stack (if-not is-throwing?
+                                     call-stack
+                                     (stack-filter-stale-args call-stack (dec form-depth)))]))
 
 (defn process-assoc-state
   [{:keys [fn-idx] :as ctx}]
