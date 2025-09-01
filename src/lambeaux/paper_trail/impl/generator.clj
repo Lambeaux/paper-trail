@@ -10,6 +10,23 @@
             [lambeaux.paper-trail :as-alias pt])
   (:import [clojure.lang IObj]))
 
+(defn code-form?
+  [form sym]
+  (and (sequential? form)
+       (= sym (first form))))
+
+(defn catch-form?
+  [form]
+  (code-form? form 'catch))
+
+(defn finally-form?
+  [form]
+  (code-form? form 'finally))
+
+;; ------------------------------------------------------------------------------------------------
+;; Generators: Command Wrappers
+;; ------------------------------------------------------------------------------------------------
+
 (defn stack-push-frame [] [{:cmd :stack-push-frame}])
 (defn stack-pop-frame [] [{:cmd :stack-pop-frame}])
 
@@ -29,6 +46,10 @@
             command-seq
             [{:cmd :end-form :form-depth depth :type type* :op operation* :impl? in-macro-impl?}])))
 
+;; ------------------------------------------------------------------------------------------------
+;; Generators: 'Callable' Primitives (run/compile time)
+;; ------------------------------------------------------------------------------------------------
+
 (defn handle-invoke
   [{:keys [form->commands] :as ctx} form]
   (let [args (rest form)
@@ -43,6 +64,20 @@
     (with-form-wrappers [ctx 'do :special]
       #_(with-implicit-do (mapcat form->commands (rest form)))
       (mapcat form->commands (rest form)))))
+
+(defn handle-macro
+  [{:keys [form->commands] :as ctx} form]
+  (let [form* (cons (first form)
+                    (map #(if (instance? IObj %)
+                            (vary-meta % assoc ::pt/macro-arg true)
+                            %)
+                         (rest form)))]
+    (with-form-wrappers [ctx (first form) :macro]
+      (form->commands (assoc ctx :in-macro-impl? true) (macroexpand form*)))))
+
+;; ------------------------------------------------------------------------------------------------
+;; Generators: Special Forms
+;; ------------------------------------------------------------------------------------------------
 
 (defn handle-if
   [{:keys [form->commands] :as ctx} form]
@@ -81,15 +116,57 @@
                         [{:cmd :unbind-name :bind-id bname :impl? in-macro-impl?}])
                       bindings)))))
 
-(defn handle-macro
-  [{:keys [form->commands] :as ctx} form]
-  (let [form* (cons (first form)
-                    (map #(if (instance? IObj %)
-                            (vary-meta % assoc ::pt/macro-arg true)
-                            %)
-                         (rest form)))]
-    (with-form-wrappers [ctx (first form) :macro]
-      (form->commands (assoc ctx :in-macro-impl? true) (macroexpand form*)))))
+(defn handle-loop
+  [{:keys [form->commands argdef-stack recur-idx in-macro-impl?] :as ctx} form]
+  (let [recur-idx (inc recur-idx)
+        bindings (partition 2 (second form))
+        body (drop 2 form)
+        argdefs (into [] (map first bindings))
+        ctx* (assoc ctx
+                    :recur-idx recur-idx
+                    :argdef-stack (conj argdef-stack argdefs))]
+    (with-form-wrappers [ctx 'loop :special]
+      (concat (mapcat (fn [[bname bform]]
+                        (with-stack-frame
+                          (concat (form->commands ctx* bform)
+                                  [{:cmd :bind-name
+                                    :bind-id bname
+                                    :bind-from :call-stack
+                                    :impl? in-macro-impl?}])))
+                      bindings)
+              [{:cmd :recur-target :idx recur-idx :impl? in-macro-impl?}]
+              #_(with-implicit-do (mapcat #(form->commands ctx* %) body))
+              (mapcat #(form->commands ctx* %) body)
+              (mapcat (fn [[bname _]]
+                        [{:cmd :unbind-name :bind-id bname :impl? in-macro-impl?}])
+                      bindings)))))
+
+(defn handle-recur
+  [{:keys [form->commands argdef-stack recur-idx in-macro-impl?] :as ctx} form]
+  (let [form->commands (partial form->commands ctx)
+        forms (rest form)
+        ;; TODO Investigate: if the repl remains alive for weeks, will we run out of gensyms?
+        state-keys (repeatedly (count forms) (fn [] (gensym "recur-")))]
+    (with-form-wrappers [ctx 'recur :special]
+      (concat (mapcat (fn [k form*]
+                        (concat (form->commands form*)
+                                [{:cmd :capture-state :state-id k :impl? in-macro-impl?}]))
+                      state-keys
+                      forms)
+              (mapcat (fn [k argdef]
+                        [{:cmd :unbind-name :bind-id argdef :impl? in-macro-impl?}
+                         {:cmd :bind-name
+                          :bind-id argdef
+                          :bind-from :state
+                          :state-id k
+                          :impl? in-macro-impl?}])
+                      state-keys
+                      (peek argdef-stack))
+              [{:cmd :replay-commands :idx recur-idx :impl? in-macro-impl?}]))))
+
+;; ------------------------------------------------------------------------------------------------
+;; Generators: (fn ... ) Special Form
+;; ------------------------------------------------------------------------------------------------
 
 (defn fnform->metainf
   [form]
@@ -145,86 +222,18 @@
     (with-form-wrappers [ctx 'fn :special]
       [{:cmd :create-fn :arities arity->metainf}])))
 
-;; todo: need to revisit this 'def logic, haven't tested it in awhile, might be garbage
-;; in general, not sure if in-fn def support is a priority
-;; note: did not add 'with-form-wrappers calls to handle-def
-(defn handle-def
-  [{:keys [form->commands argdef-stack recur-idx in-macro-impl? enable-cmd-gen? args] :as attrs} form]
-  (if enable-cmd-gen?
-    (concat [{:cmd :begin-form :type :special :op 'def :impl? in-macro-impl?}]
-            (when (> (count form) 2)
-              (form->commands attrs (last form)))
-            [{:cmd :intern-var
-              :var-id (second form)
-              :has-root-binding? (> (count form) 2)
-              :impl? in-macro-impl?}
-             {:cmd :end-form :type :special :op 'def :impl? in-macro-impl?}])
-    (if-not (and (> (count form) 2)
-                 (or (= 'fn (first (last form)))
-                     (= 'fn* (first (last form)))
-                     (= 'clojure.core/fn (first (last form)))))
-      (throw (IllegalArgumentException. (str "Provided var is not a fn: " form)))
-      (let [{:keys [argdefs body]} (get (fnform->metainf (last form)) (count args))]
-        (concat (map (fn [argdef arg]
-                       {:cmd :bind-name
-                        :bind-id argdef
-                        :bind-from :command-value
-                        :value arg
-                        :impl? false})
-                     argdefs
-                     args)
-                [{:cmd :recur-target :idx recur-idx :impl? false}]
-                (form->commands
-                 (assoc attrs :enable-cmd-gen? true :argdef-stack (conj argdef-stack argdefs))
-                 body))))))
+;; ------------------------------------------------------------------------------------------------
+;; Generators: (try ... ) / (throw ...) Special Forms
+;; ------------------------------------------------------------------------------------------------
 
-(defn handle-loop
-  [{:keys [form->commands argdef-stack recur-idx in-macro-impl?] :as ctx} form]
-  (let [recur-idx (inc recur-idx)
-        bindings (partition 2 (second form))
-        body (drop 2 form)
-        argdefs (into [] (map first bindings))
-        ctx* (assoc ctx
-                    :recur-idx recur-idx
-                    :argdef-stack (conj argdef-stack argdefs))]
-    (with-form-wrappers [ctx 'loop :special]
-      (concat (mapcat (fn [[bname bform]]
-                        (with-stack-frame
-                          (concat (form->commands ctx* bform)
-                                  [{:cmd :bind-name
-                                    :bind-id bname
-                                    :bind-from :call-stack
-                                    :impl? in-macro-impl?}])))
-                      bindings)
-              [{:cmd :recur-target :idx recur-idx :impl? in-macro-impl?}]
-              #_(with-implicit-do (mapcat #(form->commands ctx* %) body))
-              (mapcat #(form->commands ctx* %) body)
-              (mapcat (fn [[bname _]]
-                        [{:cmd :unbind-name :bind-id bname :impl? in-macro-impl?}])
-                      bindings)))))
-
-(defn handle-recur
-  [{:keys [form->commands argdef-stack recur-idx in-macro-impl?] :as ctx} form]
-  (let [form->commands (partial form->commands ctx)
-        forms (rest form)
-        ;; TODO Investigate: if the repl remains alive for weeks, will we run out of gensyms?
-        state-keys (repeatedly (count forms) (fn [] (gensym "recur-")))]
-    (with-form-wrappers [ctx 'recur :special]
-      (concat (mapcat (fn [k form*]
-                        (concat (form->commands form*)
-                                [{:cmd :capture-state :state-id k :impl? in-macro-impl?}]))
-                      state-keys
-                      forms)
-              (mapcat (fn [k argdef]
-                        [{:cmd :unbind-name :bind-id argdef :impl? in-macro-impl?}
-                         {:cmd :bind-name
-                          :bind-id argdef
-                          :bind-from :state
-                          :state-id k
-                          :impl? in-macro-impl?}])
-                      state-keys
-                      (peek argdef-stack))
-              [{:cmd :replay-commands :idx recur-idx :impl? in-macro-impl?}]))))
+(defn handle-throw
+  [{:keys [form->commands] :as ctx} form]
+  (assert (= 2 (count form))
+          "Invalid arguments to throw, expects single throwable instance")
+  (let [cmds (form->commands ctx (second form))]
+    (with-form-wrappers [ctx 'throw :special]
+      (with-stack-frame
+        (concat cmds [{:cmd :invoke-throw}])))))
 
 (defn catch->cmds
   [{:keys [form->commands in-macro-impl?] :as ctx} ex-sym body]
@@ -245,19 +254,6 @@
               (mapcat form->commands body)
               [{:cmd :set-context :props {:is-finally? false}}
                {:cmd :end-finally}]))))
-
-(defn code-form?
-  [form sym]
-  (and (sequential? form)
-       (= sym (first form))))
-
-(defn catch-form?
-  [form]
-  (code-form? form 'catch))
-
-(defn finally-form?
-  [form]
-  (code-form? form 'finally))
 
 (defn handle-try-catch-finally
   [{:keys [form->commands in-macro-impl?] :as ctx} form]
@@ -288,16 +284,46 @@
               ;; (mapcat form->commands body)
               [{:cmd :cleanup-try :id id :impl? in-macro-impl?}]))))
 
-(defn handle-throw
-  [{:keys [form->commands] :as ctx} form]
-  (assert (= 2 (count form))
-          "Invalid arguments to throw, expects single throwable instance")
-  (let [cmds (form->commands ctx (second form))]
-    (with-form-wrappers [ctx 'throw :special]
-      (with-stack-frame
-        (concat cmds [{:cmd :invoke-throw}])))))
+;; ------------------------------------------------------------------------------------------------
+;; Generators: Misc / Old / Outdated / Incomplete
+;; ------------------------------------------------------------------------------------------------
 
-;; ----------------------------------------------------------------------------------------
+;; todo: need to revisit this 'def logic, haven't tested it in awhile, might be garbage
+;; in general, not sure if in-fn def support is a priority
+;; note: did not add 'with-form-wrappers calls to handle-def
+#_(defn handle-def
+    [{:keys [form->commands argdef-stack recur-idx in-macro-impl? enable-cmd-gen? args] :as attrs} form]
+    (if enable-cmd-gen?
+      (concat [{:cmd :begin-form :type :special :op 'def :impl? in-macro-impl?}]
+              (when (> (count form) 2)
+                (form->commands attrs (last form)))
+              [{:cmd :intern-var
+                :var-id (second form)
+                :has-root-binding? (> (count form) 2)
+                :impl? in-macro-impl?}
+               {:cmd :end-form :type :special :op 'def :impl? in-macro-impl?}])
+      (if-not (and (> (count form) 2)
+                   (or (= 'fn (first (last form)))
+                       (= 'fn* (first (last form)))
+                       (= 'clojure.core/fn (first (last form)))))
+        (throw (IllegalArgumentException. (str "Provided var is not a fn: " form)))
+        (let [{:keys [argdefs body]} (get (fnform->metainf (last form)) (count args))]
+          (concat (map (fn [argdef arg]
+                         {:cmd :bind-name
+                          :bind-id argdef
+                          :bind-from :command-value
+                          :value arg
+                          :impl? false})
+                       argdefs
+                       args)
+                  [{:cmd :recur-target :idx recur-idx :impl? false}]
+                  (form->commands
+                   (assoc attrs :enable-cmd-gen? true :argdef-stack (conj argdef-stack argdefs))
+                   body))))))
+
+;; ------------------------------------------------------------------------------------------------
+;; Generators: Middleware
+;; ------------------------------------------------------------------------------------------------
 
 (defn wrap-check-macro
   [handler]
@@ -318,13 +344,16 @@
       wrap-form-depth
       wrap-check-macro))
 
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
+;; Generators: Handler Mappings
+;; ------------------------------------------------------------------------------------------------
 
 ;; todo: need to add support for the following then update test cases:
 ;; -- (quote) which needs to turn off evaluation
 ;; -- literals like maps {}, vectors [], sets #{}, and quoted lists '()
 (def form-handlers
-  {'def             (wrap-middleware handle-def)
+  {;; todo: come back later and fix (def), don't need it yet for passing tests
+   ;; 'def             (wrap-middleware handle-def)
    'do              (wrap-middleware handle-do)
    'fn              (wrap-middleware handle-fn)
    'fn*             (wrap-middleware handle-fn)
@@ -341,6 +370,10 @@
    :type/macro      (wrap-middleware handle-macro)
    :type/list       (wrap-middleware handle-invoke)
    :type/cons       (wrap-middleware handle-invoke)})
+
+;; ------------------------------------------------------------------------------------------------
+;; Generators: Form Conversion -> Commands
+;; ------------------------------------------------------------------------------------------------
 
 (defn form->commands
   [attrs form]

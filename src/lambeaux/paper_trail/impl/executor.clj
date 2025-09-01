@@ -12,21 +12,9 @@
             [lambeaux.paper-trail :as-alias pt])
   (:import [clojure.lang IObj IPending LazySeq ArityException]))
 
-(defn decompose-form
-  [form]
-  (cond (vector? form)
-        {:event :vector :children (map decompose-form form)}
-        (sequential? form)
-        (let [args (rest form)]
-          {:event :invoke
-           :op (first form)
-           :form form
-           :arg-count (count args)
-           :children (map decompose-form args)})
-        :else
-        {:event :scalar :value form}))
-
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
+;; Processors: Context Builders
+;; ------------------------------------------------------------------------------------------------
 
 (def ^:dynamic *enable-try-catch-support* true)
 
@@ -65,7 +53,9 @@
    :throwing-ex nil
    :enable-try-catch-support? *enable-try-catch-support*})
 
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
+;; Processors: Context Updaters
+;; ------------------------------------------------------------------------------------------------
 
 (comment
   "TODO (Later): Come back and revisit some cases regarding 'apply'"
@@ -91,6 +81,7 @@
                          :commands cmds
                          :command-history (conj command-history cmd*)))))
 
+;; todo: fix default-update's inability to handle an empty vector of kvs
 (defn default-update
   ([ctx kvs]
    (default-update ctx true kvs))
@@ -99,58 +90,48 @@
      consume-command? next-command
      true (update-fn-ctx (apply with-keyvals kvs)))))
 
-(def temp-ctx {::pt/current-ns *ns*})
+(defn process-no-op
+  [ctx]
+  (next-command ctx))
 
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
+;; Processors: Call Stack
+;; ------------------------------------------------------------------------------------------------
 
-(defn container-type [this] (. this containerType))
-(defn container-value [this] (. this containerValue))
-(defn container-meta [this] (. this containerMeta))
+(defn box-type [this] (. this boxType))
+(defn box-value [this] (. this boxValue))
+(defn box-meta [this] (. this boxMeta))
 
-(deftype Container [containerType containerValue containerMeta]
+(deftype StackBox [boxType boxValue boxMeta]
   IObj
   (meta [this]
-    (container-meta this))
+    (box-meta this))
   (withMeta [this m]
-    (new Container (container-type this) (container-value this) m)))
+    (new StackBox (box-type this) (box-value this) m)))
 
-(defn new-container
-  ([cv] (new-container nil cv))
-  ([ct cv] (new Container ct cv nil)))
+(defn new-box
+  ([bv] (new-box nil bv))
+  ([bt bv] (new StackBox bt bv nil)))
 
-(defmethod print-method Container
+(defmethod print-method StackBox
   [this writer]
-  (let [class-str (.getName (class (container-value this)))]
-    (.write writer (case (container-type this)
-                     :unrealized (str "#unrealized[" class-str "]")
-                     :unhandled  (str "#unhandled[" class-str "]")
-                     (str "#container[" (container-value this) "]")))))
+  (let [class-str (.getName (class (box-value this)))]
+    (.write writer (case (box-type this)
+                     :unrealized (str "#stack.unrealized[" class-str "]")
+                     :unhandled  (str "#stack.unhandled[" class-str "]")
+                     (str "#stack.val[" (box-value this) "]")))))
 
-(defn val->unrealized [v] (new-container :unrealized v))
-(defn val->unhandled [v] (new-container :unhandled v))
+(defn val->unrealized [v] (new-box :unrealized v))
+(defn val->unhandled [v] (new-box :unhandled v))
 
-(defn realized-val?
-  [val*]
-  (if (and (instance? Container val*)
-           (= :unrealized (container-type val*)))
+(defn is-realized-val?
+  [obj]
+  (if (and (instance? StackBox obj)
+           (= :unrealized (box-type obj)))
     false
-    (if-not (instance? IPending val*)
+    (if-not (instance? IPending obj)
       true
-      (realized? val*))))
-
-(defn stack-unwrap-val
-  [val*]
-  (if-not (instance? Container val*)
-    val*
-    (container-value val*)))
-
-#_(defn stack-peek*
-    [call-stack]
-    (stack-unwrap-val (peek call-stack)))
-
-#_(defn stack-take
-    [n call-stack]
-    (map stack-unwrap-val (reverse (take n call-stack))))
+      (realized? obj))))
 
 (defn is-stack-frame?
   [obj]
@@ -168,71 +149,72 @@
       (throw (IllegalStateException.
               (str "No valid stack frame to pop: " (pr-str call-stack)))))))
 
+(defn stack-val-unwrap
+  [obj]
+  (if-not (instance? StackBox obj)
+    obj
+    (box-value obj)))
+
+;; TODO: when it comes to val->unhandled, probably update from 'Exception' to 'Throwable'
+(defn stack-val-wrap
+  [obj]
+  (let [total-meta (merge {::pt/is-evaled? true} (meta obj))]
+    (with-meta
+      (cond
+        (not (is-realized-val? obj)) (val->unrealized obj)
+        (instance? Exception obj) (val->unhandled obj)
+        :else (new-box obj))
+      total-meta)))
+
 (defn stack-peek
   [call-stack]
   (let [frame-or-val (peek call-stack)
         frame? (is-stack-frame? frame-or-val)]
     (if-not frame?
-      (stack-unwrap-val frame-or-val)
-      (stack-unwrap-val (peek frame-or-val)))))
+      (stack-val-unwrap frame-or-val)
+      (stack-val-unwrap (peek frame-or-val)))))
 
 (defn stack-peek-frame
   [call-stack]
   (let [frame-or-val (peek call-stack)
         frame? (is-stack-frame? frame-or-val)]
     (if frame?
-      (mapv stack-unwrap-val frame-or-val)
+      (mapv stack-val-unwrap frame-or-val)
       (throw (IllegalStateException.
               (str "No valid stack frame to peek: " (pr-str call-stack)))))))
 
-(defn stack-eval-result
-  [depth result]
-  (let [total-meta (merge {::pt/is-evaled? true :form-depth depth} (meta result))]
-    (with-meta
-      (cond
-        (not (realized-val? result)) (val->unrealized result)
-        (instance? Exception result) (val->unhandled result)
-        :else (new-container result))
-      total-meta)))
-
-;; TODO: clean up -1 form depths, we are not using them anymore
 (defn stack-push
   [call-stack obj]
   (let [frame? (is-stack-frame? (peek call-stack))
-        result (stack-eval-result -1 obj)]
+        result (stack-val-wrap obj)]
     (if-not frame?
       (conj call-stack result)
       (conj (pop call-stack)
             (conj (peek call-stack) result)))))
 
 (defn stack-push-resolve
-  [call-stack obj]
-  (let [frame? (is-stack-frame? (peek call-stack))]
-    (if frame?
-      (stack-push (pop call-stack) obj)
-      (throw (IllegalStateException.
-              (str "No valid stack frame to resolve: " (pr-str call-stack)))))))
+  ([call-stack]
+   (stack-push-resolve call-stack (stack-peek call-stack)))
+  ([call-stack obj]
+   (let [frame? (is-stack-frame? (peek call-stack))]
+     (if frame?
+       (stack-push (pop call-stack) obj)
+       (throw (IllegalStateException.
+               (str "No valid stack frame to resolve: " (pr-str call-stack))))))))
 
-#_(defn stack-filter-stale-args
-    [call-stack depth]
-    (apply list
-           (first call-stack)
-           (filter #(> depth (:form-depth (meta %)))
-                   (rest call-stack))))
+(defn process-stack-push-frame
+  [{:keys [call-stack] :as ctx}]
+  (default-update ctx [:call-stack (stack-frame-push call-stack)]))
 
-#_(defn stack-drop-args
-    [call-stack arg-count]
-    (apply list (drop arg-count call-stack)))
+(defn process-stack-pop-frame
+  [{:keys [is-throwing? is-finally? call-stack] :as ctx}]
+  (if (or is-finally? (not is-throwing?))
+    (next-command ctx)
+    (default-update ctx [:call-stack (stack-frame-pop call-stack)])))
 
-#_(defn stack-push-result
-    [call-stack depth result]
-    (conj call-stack (stack-eval-result depth result)))
-
-#_(defn stack-resolve*
-    [call-stack depth arg-count result]
-    (stack-push-result (stack-drop-args call-stack arg-count) depth result))
-
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
+;; Processors: Function Stack
+;; ------------------------------------------------------------------------------------------------
 
 (defn push-fn-stack
   [{:keys [fn-idx fn-stack] :as ctx} commands]
@@ -246,7 +228,7 @@
 ;; necessary; the issue here is once we pop-fn-stack, we're now on a fn-idx that hasn't been augmented
 ;; with convenience bindings + other middleware housekeeping, so we have to handle things the verbose way
 (defn convey-resolved-fn-result
-  [{:keys [form-depth fn-idx] :as ctx} result]
+  [{:keys [fn-idx] :as ctx} result]
   (let [{:keys [call-stack-primary call-stack-finally finally-depth]} (get-in ctx [:fn-stack fn-idx])
         [stack-name stack-to-use] (if (zero? finally-depth)
                                     [:call-stack-primary call-stack-primary]
@@ -273,38 +255,11 @@
               (pop-fn-stack*)
               (convey-resolved-fn-result return)))))))
 
-(defn process-stack-push-frame
-  [{:keys [call-stack] :as ctx}]
-  (default-update ctx [:call-stack (stack-frame-push call-stack)]))
-
-(defn process-stack-pop-frame
-  [{:keys [is-throwing? is-finally? call-stack] :as ctx}]
-  (if (or is-finally? (not is-throwing?))
-    (next-command ctx)
-    (default-update ctx [:call-stack (stack-frame-pop call-stack)])))
-
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
+;; Processors: Function Objects
+;; ------------------------------------------------------------------------------------------------
 
 (declare execute)
-
-;; TODO clean up all this messy code that concerns
-;; symbol and namespace resolution
-(defn map-impl-fn [ctx]
-  (fn [arg]
-    (cond
-      ;; needed this check because lazy ex's were getting
-      ;; swallowed by accessible-fn? and ->impl
-      (instance? LazySeq arg) arg
-      (ptu/accessible-fn? ctx arg) (ptu/->impl ctx arg)
-      ;; note: temporary limitation: for now, fns passed as arguments must be invoked 
-      ;; as fn-in-execute and not as fn-on-stack, because return vals are expected, not
-      ;; returned context
-      (and (fn? arg) (::pt/fn-impl (meta arg))) (partial arg (new-call-ctx))
-      :else arg)))
-
-(defn process-no-op
-  [ctx]
-  (next-command ctx))
 
 (defn copy-scope-cmds
   ([keyvals]
@@ -319,7 +274,7 @@
         (seq keyvals))))
 
 (defn process-create-fn
-  [{:keys [form-depth call-stack source-scope impl-scope]
+  [{:keys [call-stack source-scope impl-scope]
     [{:keys [arities]} & _] :commands
     :as ctx}]
   (let [the-fn (let [scope-cmds (concat
@@ -340,11 +295,31 @@
     (-> ctx
         (default-update [:call-stack (stack-push call-stack the-fn*)]))))
 
+;; ------------------------------------------------------------------------------------------------
+;; Processors: Function Handlers
+;; ------------------------------------------------------------------------------------------------
+
+(def temp-ctx {::pt/current-ns *ns*})
+
+;; TODO clean up all this messy code that concerns
+;; symbol and namespace resolution
+(defn map-impl-fn [ctx]
+  (fn [arg]
+    (cond
+      ;; needed this check because lazy ex's were getting
+      ;; swallowed by accessible-fn? and ->impl
+      (instance? LazySeq arg) arg
+      (ptu/accessible-fn? ctx arg) (ptu/->impl ctx arg)
+      ;; note: temporary limitation: for now, fns passed as arguments must be invoked 
+      ;; as fn-in-execute and not as fn-on-stack, because return vals are expected, not
+      ;; returned context
+      (and (fn? arg) (::pt/fn-impl (meta arg))) (partial arg (new-call-ctx))
+      :else arg)))
+
 (defn invoke-opaque-fn
-  [{:keys [form-depth throwing-ex is-throwing? is-finally? call-stack] :as ctx}
+  [{:keys [throwing-ex is-throwing? is-finally? call-stack] :as ctx}
    fn-impl]
   (let [[ex? result] (try
-                       ;; TODO: search local bindings for invokable fns
                        (let [return (apply fn-impl
                                            (map (map-impl-fn temp-ctx)
                                                 (stack-peek-frame call-stack)))]
@@ -398,14 +373,19 @@
        :is-throwing? true
        :is-finally? false
        :throwing-ex (stack-peek call-stack))
+      ;; todo: fix default-update's inability to handle an empty vector of kvs
       (default-update [:call-stack call-stack])))
 
 (defn process-invoke-do
   [{:keys [call-stack] :as ctx}]
-  (default-update ctx [:call-stack (stack-push-resolve call-stack (stack-peek call-stack))]))
+  (default-update ctx [:call-stack (stack-push-resolve call-stack)]))
+
+;; ------------------------------------------------------------------------------------------------
+;; Processors: Terminal Value Handlers
+;; ------------------------------------------------------------------------------------------------
 
 (defn process-scalar
-  [{:keys [form-depth call-stack source-scope impl-scope]
+  [{:keys [call-stack source-scope impl-scope]
     [cmd & _] :commands
     :as ctx}]
   (let [scalar-form (:form cmd)
@@ -418,24 +398,27 @@
                        scalar-value)]
     (default-update ctx [:call-stack (stack-push call-stack scalar-value)])))
 
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
+;; Processors: State & Scope Handlers
+;; ------------------------------------------------------------------------------------------------
 
 (defn process-capture-state
   [{:keys [call-stack state]
     [cmd & _] :commands
     :as ctx}]
   ;; todo: should we pop the call-stack in this scenario?
+  ;; no, we should not (but awaiting test case verification)
   (default-update ctx [:state (assoc state (:state-id cmd) (stack-peek call-stack))]))
 
 (defn process-bind-name
-  [{:keys [is-throwing? state call-stack source-scope impl-scope]
+  [{:keys [state call-stack source-scope impl-scope]
     [{:keys [bind-id bind-from impl? value state-id]} & _] :commands
     :as ctx}]
   (let [val-to-bind  (case bind-from
                        :command-value value
                        :call-stack (stack-peek call-stack)
                        :state (get state state-id))
-        val-to-bind  (if-not (realized-val? val-to-bind)
+        val-to-bind  (if-not (is-realized-val? val-to-bind)
                        val-to-bind
                        (case val-to-bind
                          nil ::pt/nil
@@ -444,7 +427,7 @@
         keyval-pairs (if impl?
                        [:impl-scope (update impl-scope bind-id #(conj % val-to-bind))]
                        [:source-scope (update source-scope bind-id #(conj % val-to-bind))])]
-    (default-update ctx (if (or is-throwing? (not= :call-stack bind-from))
+    (default-update ctx (if (not= :call-stack bind-from)
                           keyval-pairs
                           (conj keyval-pairs :call-stack (stack-frame-pop call-stack))))))
 
@@ -457,7 +440,9 @@
                   [:source-scope (update source-scope bind-id pop)])]
     (default-update ctx keyvals)))
 
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
+;; Processors: Flow Control Handlers
+;; ------------------------------------------------------------------------------------------------
 
 (defn keyvals-for-exec
   [{:keys [command-history]
@@ -504,7 +489,9 @@
                     [:commands (concat (reverse cmds-to-replay) [cmd] cmds)
                      :command-history (drop (count cmds-to-replay) command-history)])))
 
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
+;; Processors: Try/Catch/Finally Handlers
+;; ------------------------------------------------------------------------------------------------
 
 (defn find-catch
   [e catches]
@@ -549,7 +536,9 @@
     :begin-finally (update-in (next-command ctx) [:fn-stack fn-idx :finally-depth] inc)
     :end-finally   (update-in (next-command ctx) [:fn-stack fn-idx :finally-depth] dec)))
 
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
+;; Processors: Middleware
+;; ------------------------------------------------------------------------------------------------
 
 (def allowed-op-when-throwing?
   #{:stack-push-frame
@@ -637,15 +626,9 @@
           all-handlers
           (keys all-handlers)))
 
-;; ----------------------------------------------------------------------------------------
-
-"TODO: When 'throwing?' -- we only care about:
- ** unbind-name
- ** cleanup-try
- 
- Alternate between processing the two so that intermediate (finally)
- forms and catch/re-throws are scoped correctly as you work your way
- back up the fn call stack."
+;; ------------------------------------------------------------------------------------------------
+;; Processors: Misc
+;; ------------------------------------------------------------------------------------------------
 
 (defn process-begin-form
   [{:keys [form-depth] :as ctx}]
@@ -675,6 +658,22 @@
   [ctx]
   (let [f (:hook-fn (first (:commands ctx)))]
     (f ctx)))
+
+(comment
+  "Example use case for test hook: "
+  (let [f (fn [{:keys [fn-idx] :as ctx}]
+            (-> ctx
+                next-command
+                (assoc-in [:fn-stack fn-idx :is-throwing?] true)))
+        test-hook {:cmd :test-hook :hook-fn f}
+        cmds (ptg/create-commands '(+ 1 1))
+        cmds* (concat (butlast cmds)
+                      [test-hook (last cmds)])]
+    (execute cmds*)))
+
+;; ------------------------------------------------------------------------------------------------
+;; Processors: Handler Mappings
+;; ------------------------------------------------------------------------------------------------
 
 (defn create-command-handlers
   []
@@ -708,17 +707,9 @@
     :test-hook        process-test-hook
     :not-implemented  process-scalar}))
 
-(comment
-  "Example use case for test hook: "
-  (let [f (fn [{:keys [fn-idx] :as ctx}]
-            (-> ctx
-                next-command
-                (assoc-in [:fn-stack fn-idx :is-throwing?] true)))
-        test-hook {:cmd :test-hook :hook-fn f}
-        cmds (ptg/create-commands '(+ 1 1))
-        cmds* (concat (butlast cmds)
-                      [test-hook (last cmds)])]
-    (execute cmds*)))
+;; ------------------------------------------------------------------------------------------------
+;; Processors: Command Execution
+;; ------------------------------------------------------------------------------------------------
 
 ;; also consider wrapping exceptions we know should be thrown inside
 ;; ex-info's with attached metadata, then wrap the entire interpreter
@@ -749,32 +740,32 @@
            (> fn-idx 0)      (recur (pop-fn-stack ctx))
            :else             (pop-fn-stack ctx)))))))
 
-(defn get-fctx
-  [context]
-  (get-in context [:fn-stack (:fn-idx context)]))
+#_(defn get-fctx
+    [context]
+    (get-in context [:fn-stack (:fn-idx context)]))
 
-(defn execute-seq
-  [handlers context]
-  (cons context
-        (lazy-seq
-         (let [fctx (get-fctx context)
-               h (get handlers (:cmd (first (:commands fctx))))]
-           (when h
-             (execute-seq handlers (h context)))))))
+#_(defn execute-seq
+    [handlers context]
+    (cons context
+          (lazy-seq
+           (let [fctx (get-fctx context)
+                 h (get handlers (:cmd (first (:commands fctx))))]
+             (when h
+               (execute-seq handlers (h context)))))))
 
-(defn execute-lazy
-  [commands]
-  (let [command-handlers (create-command-handlers)
-        initial-ctx (new-exec-ctx commands)
-        seq* (execute-seq command-handlers initial-ctx)
-        final-ctx (last seq*)
-        {:keys [enable-try-catch-support? throwing-ex is-throwing?]} final-ctx
-        call-stack (:call-stack (get-fctx final-ctx))]
-    (if (and enable-try-catch-support? is-throwing?)
+#_(defn execute-lazy
+    [commands]
+    (let [command-handlers (create-command-handlers)
+          initial-ctx (new-exec-ctx commands)
+          seq* (execute-seq command-handlers initial-ctx)
+          final-ctx (last seq*)
+          {:keys [enable-try-catch-support? throwing-ex is-throwing?]} final-ctx
+          call-stack (:call-stack (get-fctx final-ctx))]
+      (if (and enable-try-catch-support? is-throwing?)
       ;; SEE ABOVE TODO ITEM
-      (throw throwing-ex)
-      (stack-peek call-stack))
-    seq*))
+        (throw throwing-ex)
+        (stack-peek call-stack))
+      seq*))
 
 (defn ctx-seq
   [input]
