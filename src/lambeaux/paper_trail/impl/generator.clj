@@ -10,6 +10,17 @@
             [lambeaux.paper-trail :as-alias pt])
   (:import [clojure.lang IObj]))
 
+(defn stack-push-frame [] [{:cmd :stack-push-frame}])
+(defn stack-pop-frame [] [{:cmd :stack-pop-frame}])
+
+(defn with-stack-frame
+  [command-seq]
+  (concat (stack-push-frame) command-seq (stack-pop-frame)))
+
+(defn with-implicit-do
+  [command-seq]
+  (with-stack-frame (concat command-seq [{:cmd :invoke-do}])))
+
 (defn with-form-wrappers
   "Wraps a seq of commands with the :begin-form and :end-form commands."
   [[{:keys [form-depth in-macro-impl?] :as _ctx} operation* type*] command-seq]
@@ -23,12 +34,14 @@
   (let [args (rest form)
         cmds (mapcat (partial form->commands ctx) args)]
     (with-form-wrappers [ctx (first form) :fn]
-      (concat cmds [{:cmd :invoke-fn :op (first form) :arg-count (count args)}]))))
+      (with-stack-frame
+        (concat cmds [{:cmd :invoke-fn :op (first form) :arg-count (count args)}])))))
 
 (defn handle-do
   [{:keys [form->commands] :as ctx} form]
   (let [form->commands (partial form->commands ctx)]
     (with-form-wrappers [ctx 'do :special]
+      #_(with-implicit-do (mapcat form->commands (rest form)))
       (mapcat form->commands (rest form)))))
 
 (defn handle-if
@@ -55,12 +68,14 @@
     ;; :op (first form) ??
     (with-form-wrappers [ctx 'let :special]
       (concat (mapcat (fn [[bname bform]]
-                        (concat (form->commands bform)
-                                [{:cmd :bind-name
-                                  :bind-id bname
-                                  :bind-from :call-stack
-                                  :impl? in-macro-impl?}]))
+                        (with-stack-frame
+                          (concat (form->commands bform)
+                                  [{:cmd :bind-name
+                                    :bind-id bname
+                                    :bind-from :call-stack
+                                    :impl? in-macro-impl?}])))
                       bindings)
+              #_(with-implicit-do (mapcat form->commands body))
               (mapcat form->commands body)
               (mapcat (fn [[bname _]]
                         [{:cmd :unbind-name :bind-id bname :impl? in-macro-impl?}])
@@ -118,6 +133,7 @@
                                          (map #(str "arg-" %) (range (count argdefs)))
                                          argdefs)
                                     [{:cmd :recur-target :idx recur-idx :impl? false}]
+                                    #_(with-implicit-do (form->commands attrs* body))
                                     (form->commands attrs* body))]
               (update accum k #(assoc % :commands commands*))))
           metainf
@@ -173,13 +189,15 @@
                     :argdef-stack (conj argdef-stack argdefs))]
     (with-form-wrappers [ctx 'loop :special]
       (concat (mapcat (fn [[bname bform]]
-                        (concat (form->commands ctx* bform)
-                                [{:cmd :bind-name
-                                  :bind-id bname
-                                  :bind-from :call-stack
-                                  :impl? in-macro-impl?}]))
+                        (with-stack-frame
+                          (concat (form->commands ctx* bform)
+                                  [{:cmd :bind-name
+                                    :bind-id bname
+                                    :bind-from :call-stack
+                                    :impl? in-macro-impl?}])))
                       bindings)
               [{:cmd :recur-target :idx recur-idx :impl? in-macro-impl?}]
+              #_(with-implicit-do (mapcat #(form->commands ctx* %) body))
               (mapcat #(form->commands ctx* %) body)
               (mapcat (fn [[bname _]]
                         [{:cmd :unbind-name :bind-id bname :impl? in-macro-impl?}])
@@ -213,6 +231,7 @@
   (let [form->commands (partial form->commands ctx)]
     (with-form-wrappers [ctx 'catch :special]
       (concat [{:cmd :bind-name :bind-id ex-sym :bind-from :state :state-id :caught-ex :impl? in-macro-impl?}]
+              #_(with-implicit-do (mapcat form->commands body))
               (mapcat form->commands body)
               [{:cmd :unbind-name :bind-id ex-sym :impl? in-macro-impl?}]))))
 
@@ -222,6 +241,7 @@
     (with-form-wrappers [ctx 'finally :special]
       (concat [{:cmd :begin-finally}
                {:cmd :set-context :props {:is-finally? true}}]
+              #_(with-implicit-do (mapcat form->commands body))
               (mapcat form->commands body)
               [{:cmd :set-context :props {:is-finally? false}}
                {:cmd :end-finally}]))))
@@ -264,7 +284,8 @@
                 :finally (when finally*
                            (finally->cmds ctx (rest finally*)))
                 :impl? in-macro-impl?}]
-              (mapcat form->commands body)
+              (with-implicit-do (mapcat form->commands body))
+              ;; (mapcat form->commands body)
               [{:cmd :cleanup-try :id id :impl? in-macro-impl?}]))))
 
 (defn handle-throw
@@ -273,7 +294,8 @@
           "Invalid arguments to throw, expects single throwable instance")
   (let [cmds (form->commands ctx (second form))]
     (with-form-wrappers [ctx 'throw :special]
-      (concat cmds [{:cmd :invoke-throw}]))))
+      (with-stack-frame
+        (concat cmds [{:cmd :invoke-throw}])))))
 
 ;; ----------------------------------------------------------------------------------------
 
