@@ -40,18 +40,18 @@
         :else
         {:event :scalar :value form}))
 
-#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (defn tiny-context
-  [context]
-  (let [$ context
-        fn-idx (:fn-idx $)
-        stack (get-in $ [:fn-stack fn-idx :call-stack-primary])
-        stackf (get-in $ [:fn-stack fn-idx :call-stack-finally])
-        commands (get-in $ [:fn-stack fn-idx :commands])]
-    (merge (select-keys $ [:is-throwing? :is-finally?])
-           {:call-stack-primary stack
-            :call-stack-finally stackf
-            :commands (take 15 commands)})))
+  [{:keys [fn-idx] :as ctx}]
+  (let [fctx (get-in ctx [:fn-stack fn-idx])
+        commands (:commands fctx)]
+    (merge (select-keys ctx [:is-throwing? :is-finally?])
+           (select-keys fctx [:source-scope :call-stack-primary :call-stack-finally])
+           {:commands (take 15 commands)})))
+
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
+(defn with-eval-to
+  [idx form]
+  (tiny-context (impl/evaluate-to idx form)))
 
 (comment
 

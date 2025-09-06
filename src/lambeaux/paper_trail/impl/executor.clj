@@ -579,10 +579,15 @@
 
 (defn wrap-check-not-infinite
   [handler]
-  (fn [{:keys [fn-idx] :as ctx}]
+  (fn [ctx]
     (let [ctx* (handler ctx)
-          pre-handler-cmds (get-in ctx [:fn-stack fn-idx :commands])
-          post-handler-cmds (get-in ctx* [:fn-stack fn-idx :commands])]
+          pre-idx (:fn-idx ctx)
+          post-idx (:fn-idx ctx*)
+          pre-handler-cmds (get-in ctx [:fn-stack pre-idx :commands])
+          post-handler-cmds (get-in ctx* [:fn-stack post-idx :commands])]
+      ;; TODO: what happens when the commands happen to be equal but the fn-idx changed?
+      ;; likely will never happen even in a true recursive call because SOME of the pre-idx commands
+      ;; HAD to be processed in order to invoke the interpreted fn at post-idx
       (if-not (= pre-handler-cmds post-handler-cmds)
         ctx*
         (throw (new AssertionError
