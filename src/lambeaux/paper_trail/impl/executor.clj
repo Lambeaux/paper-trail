@@ -9,6 +9,7 @@
   (:require [clojure.set :as set]
             [lambeaux.paper-trail.impl.generator :as ptg]
             [lambeaux.paper-trail.impl.util :as ptu]
+            [lambeaux.paper-trail.impl.lib :refer [assert*]]
             [lambeaux.paper-trail :as-alias pt])
   (:import [clojure.lang IObj IPending LazySeq ArityException]))
 
@@ -26,7 +27,7 @@
   ([call-type exec-ctx]
    {:call-type call-type
     :exec-ctx (when (= :fn-on-stack call-type)
-                (assert (map? exec-ctx) "exec-ctx must be a map")
+                (assert* (map? exec-ctx) "exec-ctx must be a map")
                 exec-ctx)}))
 
 (defn new-fn-ctx
@@ -224,6 +225,9 @@
 
 (defn pop-fn-stack*
   [{:keys [fn-idx] :as ctx}]
+  (assert* (> fn-idx 0)
+           (str "Fn stack cannot be popped unless fn-idx > 0 but fn-idx is "
+                fn-idx))
   (-> ctx
       (update :fn-idx dec)
       (update :fn-stack pop)
@@ -595,16 +599,18 @@
       ;; HAD to be processed in order to invoke the interpreted fn at post-idx
       (if-not (= pre-handler-cmds post-handler-cmds)
         ctx*
-        (throw (new AssertionError
+        (throw (new RuntimeException
                     "Infinite processing error detected: handler did not update commands"))))))
 
 (defn wrap-convenience-mappings
   [handler]
   (fn [{:keys [fn-idx] :as ctx}]
     (let [fctx (get-in ctx [:fn-stack fn-idx])]
-      (assert (empty? (set/intersection (into #{} (keys ctx))
-                                        (into #{} (keys fctx))))
-              "There must be no key overlap between ctx and fctx")
+      (let [overlap (set/intersection (into #{} (keys ctx))
+                                      (into #{} (keys fctx)))]
+        (assert* (empty? overlap)
+                 (str "There must be no key overlap between ctx and fctx but found "
+                      (pr-str overlap))))
       (apply dissoc
              (handler (merge ctx fctx))
              (keys fctx)))))
@@ -614,8 +620,10 @@
   (fn [ctx]
     (try
       (handler ctx)
-      (catch Exception e
-        (throw (ex-info "Uncaught interpreter exception" {:ctx ctx} e))))))
+      (catch Exception ex
+        (throw (ex-info "Uncaught interpreter exception"
+                        {:ctx ctx :cause-data (ex-data ex)}
+                        ex))))))
 
 (defn wrap-command-middleware
   ([handler]
