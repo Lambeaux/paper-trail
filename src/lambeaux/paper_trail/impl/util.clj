@@ -6,7 +6,9 @@
 ;; the terms of this license.
 ;; You must not remove this notice, or any other, from this software.
 (ns lambeaux.paper-trail.impl.util
-  (:require [lambeaux.paper-trail :as-alias pt])
+  (:require [clojure.set :as set]
+            [lambeaux.paper-trail.impl.lib :refer [assert*]]
+            [lambeaux.paper-trail :as-alias pt])
   (:import [clojure.lang Cons]))
 
 (defn counter-fn
@@ -16,6 +18,13 @@
   (let [state* (atom -1)]
     (fn []
       (swap! state* inc))))
+
+(defn disallow-overlap!
+  [& keysets]
+  (let [overlap (apply set/intersection keysets)]
+    (assert* (empty? overlap)
+             (str "There must be no overlap between the keysets but found "
+                  (pr-str overlap)))))
 
 ;; ----------------------------------------------------------------------------
 ;; Predicates / Resolvers

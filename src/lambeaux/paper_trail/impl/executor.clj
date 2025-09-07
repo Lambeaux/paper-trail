@@ -6,107 +6,14 @@
 ;; the terms of this license.
 ;; You must not remove this notice, or any other, from this software.
 (ns lambeaux.paper-trail.impl.executor
-  (:require [clojure.set :as set]
-            [lambeaux.paper-trail.impl.call-stack :as stack]
+  (:require [lambeaux.paper-trail.impl.call-stack :as stack]
+            [lambeaux.paper-trail.impl.data-model :as model]
+            [lambeaux.paper-trail.impl.middleware :as middleware]
             [lambeaux.paper-trail.impl.generator :as ptg]
             [lambeaux.paper-trail.impl.util :as ptu]
             [lambeaux.paper-trail.impl.lib :refer [assert*]]
             [lambeaux.paper-trail :as-alias pt])
   (:import [clojure.lang LazySeq ArityException]))
-
-(defn disallow-overlap!
-  [& keysets]
-  (let [overlap (apply set/intersection keysets)]
-    (assert* (empty? overlap)
-             (str "There must be no overlap between the keysets but found "
-                  (pr-str overlap)))))
-
-;; ------------------------------------------------------------------------------------------------
-;; Processors: Context Builders
-;; ------------------------------------------------------------------------------------------------
-
-(def ^:dynamic *enable-try-catch-support* true)
-
-(defn new-call-ctx
-  ([]
-   (new-call-ctx :fn-in-execute nil))
-  ([exec-ctx]
-   (new-call-ctx :fn-on-stack exec-ctx))
-  ([call-type exec-ctx]
-   {:call-type call-type
-    :exec-ctx (when (= :fn-on-stack call-type)
-                (assert* (map? exec-ctx) "exec-ctx must be a map")
-                exec-ctx)}))
-
-(defn new-fn-ctx
-  [commands]
-  {:commands commands
-   :command-history (list)
-   ;; :call-stack (list) ;; (added with middleware)
-   :call-stack-primary (list)
-   :call-stack-finally (list)
-   :form-depth -1
-   :finally-depth 0
-   :source-scope {}
-   :impl-scope {}
-   :state {}})
-
-(defn new-exec-ctx
-  [commands]
-  {:fn-idx 0
-   :cmd-counter (atom -1)
-   :fn-stack [(new-fn-ctx commands)]
-   :try-handlers (list)
-   :is-throwing? false
-   :is-finally? false
-   :throwing-ex nil
-   :enable-try-catch-support? *enable-try-catch-support*})
-
-(def allowed-fn-keys (into #{} (keys (new-fn-ctx nil))))
-(def allowed-exec-keys (into #{} (keys (new-exec-ctx nil))))
-
-(disallow-overlap! allowed-exec-keys allowed-fn-keys)
-
-;; ------------------------------------------------------------------------------------------------
-;; Processors: Context Updaters
-;; ------------------------------------------------------------------------------------------------
-
-(comment
-  "TODO (Later): Come back and revisit some cases regarding 'apply'"
-  ;; does not use varadic
-  (apply update-in [{:k []}
-                    [:k 0]
-                    (fn [m & args] (apply assoc m [:x 1 :args args]))]))
-
-(defn with-keyvals
-  [& kvs]
-  (fn [m] (apply assoc m kvs)))
-
-(defn update-fn-ctx
-  [{:keys [fn-idx] :as ctx} f & args]
-  (apply update-in (concat [ctx [:fn-stack fn-idx] f] args)))
-
-(defn next-command
-  [{:keys [cmd-counter command-history]
-    [cmd & cmds] :commands
-    :as ctx}]
-  (let [cmd* (assoc cmd :cmd-idx (swap! cmd-counter inc))]
-    (update-fn-ctx ctx (with-keyvals
-                         :commands cmds
-                         :command-history (conj command-history cmd*)))))
-
-;; todo: fix default-update's inability to handle an empty vector of kvs
-(defn default-update
-  ([ctx kvs]
-   (default-update ctx true kvs))
-  ([ctx consume-command? kvs]
-   (cond-> ctx
-     consume-command? next-command
-     true (update-fn-ctx (apply with-keyvals kvs)))))
-
-(defn process-no-op
-  [ctx]
-  (next-command ctx))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Processors: Call Stack
@@ -121,26 +28,24 @@
 
 (defn process-stack-push-frame
   [{:keys [call-stack] :as ctx}]
-  (default-update ctx [:call-stack (stack/frame-push call-stack)]))
+  (model/default-update ctx [:call-stack (stack/frame-push call-stack)]))
 
 (defn process-stack-pop-frame
   [{:keys [is-throwing? is-finally? call-stack] :as ctx}]
   (if (or is-finally? (not is-throwing?))
-    (next-command ctx)
-    (default-update ctx [:call-stack (stack/frame-pop call-stack)])))
+    (model/next-command ctx)
+    (model/default-update ctx [:call-stack (stack/frame-pop call-stack)])))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Processors: Function Stack
 ;; ------------------------------------------------------------------------------------------------
-
-(declare with-middleware)
 
 ;; Note: probably don't need the middleware for a push, only exec-ctx fields are relevant
 (defn fn-stack-push
   [ctx commands]
   (-> ctx
       (update :fn-idx inc)
-      (update :fn-stack #(conj % (new-fn-ctx commands)))))
+      (update :fn-stack #(conj % (model/new-fn-ctx commands)))))
 
 (defn fn-stack-do-pop*
   [{:keys [fn-idx] :as ctx}]
@@ -150,14 +55,14 @@
   (let [ctx* (-> ctx
                  (update :fn-idx dec)
                  (update :fn-stack pop))]
-    (with-middleware next-command ctx*)))
+    (middleware/run-with model/next-command ctx*)))
 
 (defn fn-stack-resolve*
   [ctx result]
   (let [convey-fn (fn [{:keys [call-stack] :as ctx*}]
-                    (default-update
+                    (model/default-update
                      ctx* false [:call-stack (stack/push-resolved-val call-stack result)]))]
-    (with-middleware convey-fn ctx)))
+    (middleware/run-with convey-fn ctx)))
 
 (defn fn-stack-pop
   [{:keys [fn-idx throwing-ex is-throwing?] :as ctx}]
@@ -210,8 +115,7 @@
                        (throw (ArityException. arg-count obj-name))))))
         the-fn* (with-meta (partial the-fn (str the-fn))
                   {::pt/fn-impl true})]
-    (-> ctx
-        (default-update [:call-stack (stack/push-val call-stack the-fn*)]))))
+    (model/default-update ctx [:call-stack (stack/push-val call-stack the-fn*)])))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Processors: Function Handlers
@@ -231,7 +135,7 @@
       ;; note: temporary limitation: for now, fns passed as arguments must be invoked 
       ;; as fn-in-execute and not as fn-on-stack, because return vals are expected, not
       ;; returned context
-      (and (fn? arg) (::pt/fn-impl (meta arg))) (partial arg (new-call-ctx))
+      (and (fn? arg) (::pt/fn-impl (meta arg))) (partial arg (model/new-call-ctx))
       :else arg)))
 
 (defn invoke-opaque-fn
@@ -261,7 +165,7 @@
          :is-throwing? (boolean (or is-throwing? ex?))
          :is-finally? (if ex? false is-finally?)
          :throwing-ex (if ex? result throwing-ex))
-        (default-update
+        (model/default-update
          [:call-stack (if ex?
                         call-stack
                         (stack/push-resolved-val call-stack result))]))))
@@ -269,7 +173,7 @@
 (defn invoke-interpreted-fn
   [{:keys [call-stack] :as ctx} fn-impl]
   (apply fn-impl
-         (new-call-ctx ctx)
+         (model/new-call-ctx ctx)
          (map (map-impl-fn temp-ctx)
               (stack/peek-frame call-stack))))
 
@@ -291,12 +195,12 @@
        :is-throwing? true
        :is-finally? false
        :throwing-ex (stack/peek-val call-stack))
-      ;; todo: fix default-update's inability to handle an empty vector of kvs
-      (default-update [:call-stack call-stack])))
+      ;; todo: fix model/default-update's inability to handle an empty vector of kvs
+      (model/default-update [:call-stack call-stack])))
 
 (defn process-invoke-do
   [{:keys [call-stack] :as ctx}]
-  (default-update ctx [:call-stack (stack/push-resolved-val call-stack)]))
+  (model/default-update ctx [:call-stack (stack/push-resolved-val call-stack)]))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Processors: Terminal Value Handlers
@@ -314,7 +218,7 @@
                        ::pt/nil nil
                        ::pt/false false
                        scalar-value)]
-    (default-update ctx [:call-stack (stack/push-val call-stack scalar-value)])))
+    (model/default-update ctx [:call-stack (stack/push-val call-stack scalar-value)])))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Processors: State & Scope Handlers
@@ -326,7 +230,7 @@
     :as ctx}]
   ;; todo: should we pop the call-stack in this scenario?
   ;; no, we should not (but awaiting test case verification)
-  (default-update ctx [:state (assoc state (:state-id cmd) (stack/peek-val call-stack))]))
+  (model/default-update ctx [:state (assoc state (:state-id cmd) (stack/peek-val call-stack))]))
 
 (defn process-bind-name
   [{:keys [state call-stack source-scope impl-scope]
@@ -345,9 +249,9 @@
         keyval-pairs (if impl?
                        [:impl-scope (update impl-scope bind-id #(conj % val-to-bind))]
                        [:source-scope (update source-scope bind-id #(conj % val-to-bind))])]
-    (default-update ctx (if (not= :call-stack bind-from)
-                          keyval-pairs
-                          (conj keyval-pairs :call-stack (stack/frame-pop call-stack))))))
+    (model/default-update ctx (if (not= :call-stack bind-from)
+                                keyval-pairs
+                                (conj keyval-pairs :call-stack (stack/frame-pop call-stack))))))
 
 (defn process-unbind-name
   [{:keys [source-scope impl-scope]
@@ -356,7 +260,7 @@
   (let [keyvals (if impl?
                   [:impl-scope (update impl-scope bind-id pop)]
                   [:source-scope (update source-scope bind-id pop)])]
-    (default-update ctx keyvals)))
+    (model/default-update ctx keyvals)))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Processors: Flow Control Handlers
@@ -384,7 +288,7 @@
   (let [keyvals (if (get state (:state-id cmd))
                   (keyvals-for-exec ctx)
                   (keyvals-for-skip ctx))]
-    (default-update ctx false keyvals)))
+    (model/default-update ctx false keyvals)))
 
 (defn process-skip-when
   [{:keys [state]
@@ -393,7 +297,7 @@
   (let [keyvals (if (get state (:state-id cmd))
                   (keyvals-for-skip ctx)
                   (keyvals-for-exec ctx))]
-    (default-update ctx false keyvals)))
+    (model/default-update ctx false keyvals)))
 
 (defn process-replay-commands
   [{:keys [command-history]
@@ -402,10 +306,10 @@
   (let [cmds-to-replay (take-while (fn [old-cmd]
                                      (not (and (= :recur-target (:cmd old-cmd))
                                                (= idx (:idx old-cmd)))))
-                                   command-history)]
-    (default-update ctx false
-                    [:commands (concat (reverse cmds-to-replay) [cmd] cmds)
-                     :command-history (drop (count cmds-to-replay) command-history)])))
+                                   command-history)
+        kvs [:commands (concat (reverse cmds-to-replay) [cmd] cmds)
+             :command-history (drop (count cmds-to-replay) command-history)]]
+    (model/default-update ctx false kvs)))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Processors: Try/Catch/Finally Handlers
@@ -423,7 +327,7 @@
     [cmd] :commands
     :as ctx}]
   (-> ctx
-      next-command
+      model/next-command
       (assoc :try-handlers
              (conj try-handlers
                    (merge (select-keys ctx [:fn-idx])
@@ -441,121 +345,18 @@
         (assoc :is-throwing? still-throwing?
                :try-handlers (pop try-handlers)
                :throwing-ex (when still-throwing? throwing-ex))
-        (default-update [:commands (concat catch-commands finally-commands cmds)
-                         :state    (if-not ex-caught?
-                                     state
-                                     ;; note: wanted to wrap the ex in a val->unhandled
-                                     (assoc state :caught-ex throwing-ex))]))))
+        (model/default-update [:commands (concat catch-commands finally-commands cmds)
+                               :state    (if-not ex-caught?
+                                           state
+                                           ;; note: wanted to wrap the ex in a val->unhandled
+                                           (assoc state :caught-ex throwing-ex))]))))
 
 (defn process-finally
   [{:keys [fn-idx commands] :as ctx}]
   (case (:cmd (first commands))
     ;; todo: the fn-stack is still leaking into the context, clean it up
-    :begin-finally (update-in (next-command ctx) [:fn-stack fn-idx :finally-depth] inc)
-    :end-finally   (update-in (next-command ctx) [:fn-stack fn-idx :finally-depth] dec)))
-
-;; ------------------------------------------------------------------------------------------------
-;; Processors: Middleware
-;; ------------------------------------------------------------------------------------------------
-
-(def allowed-op-when-throwing?
-  #{:stack-push-frame
-    :stack-pop-frame
-    :unbind-name
-    :cleanup-try
-    :set-context
-    :begin-finally
-    :end-finally})
-
-(defn wrap-throwing
-  [handler]
-  (fn [{:keys [is-throwing? is-finally?] [{:keys [cmd]}] :commands :as ctx}]
-    (if (and is-throwing?
-             (not is-finally?)
-             (not (allowed-op-when-throwing? cmd)))
-      (process-no-op ctx)
-      (handler ctx))))
-
-(defn wrap-call-stack
-  [handler]
-  (fn [{:keys [fn-idx call-stack-primary call-stack-finally finally-depth] :as ctx}]
-    (let [[stack-name stack-to-use] (if (zero? finally-depth)
-                                      [:call-stack-primary call-stack-primary]
-                                      [:call-stack-finally call-stack-finally])
-          ctx* (handler (-> ctx
-                            (assoc :call-stack stack-to-use)
-                            (assoc-in [:fn-stack fn-idx :call-stack] stack-to-use)))
-          ;; todo: fix stack writes for better parity
-          ;; modified-stack (:call-stack ctx*)
-          ;; -------------------------
-          ;; todo: it's possible, if the fn-stack was pushed/popped, that modified-stack is nil
-          modified-stack (get-in ctx* [:fn-stack fn-idx :call-stack])
-          ctx** (dissoc ctx* :call-stack)]
-      (if-not modified-stack
-        ctx**
-        (assoc-in ctx** [:fn-stack fn-idx stack-name] modified-stack)))))
-
-(defn wrap-check-not-infinite
-  [handler]
-  (fn [ctx]
-    (let [ctx* (handler ctx)
-          pre-idx (:fn-idx ctx)
-          post-idx (:fn-idx ctx*)
-          pre-handler-cmds (get-in ctx [:fn-stack pre-idx :commands])
-          post-handler-cmds (get-in ctx* [:fn-stack post-idx :commands])]
-      ;; TODO: what happens when the commands happen to be equal but the fn-idx changed?
-      ;; likely will never happen even in a true recursive call because SOME of the pre-idx commands
-      ;; HAD to be processed in order to invoke the interpreted fn at post-idx
-      (if-not (= pre-handler-cmds post-handler-cmds)
-        ctx*
-        (throw (new RuntimeException
-                    "Infinite processing error detected: handler did not update commands"))))))
-
-(defn wrap-convenience-mappings
-  [handler]
-  (fn [{:keys [fn-idx] :as ctx}]
-    (let [fctx (get-in ctx [:fn-stack fn-idx])]
-      (disallow-overlap! (into #{} (keys ctx))
-                         (into #{} (keys fctx)))
-      (apply dissoc
-             (handler (merge ctx fctx))
-             (keys fctx)))))
-
-(defn wrap-uncaught-ex
-  [handler]
-  (fn [ctx]
-    (try
-      (handler ctx)
-      (catch Exception ex
-        (throw (ex-info "Uncaught interpreter exception"
-                        {:ctx ctx :cause-data (ex-data ex)}
-                        ex))))))
-
-(defn wrap-command-middleware
-  ([handler]
-   (wrap-command-middleware true handler))
-  ([wrap-infinite? handler]
-   (cond-> handler
-     true           wrap-throwing
-     true           wrap-call-stack
-     wrap-infinite? wrap-check-not-infinite
-     true           wrap-convenience-mappings
-     true           wrap-uncaught-ex)))
-
-;; (wrap-command-middleware false f)
-(defn with-middleware
-  [f ctx & args]
-  (apply (-> (wrap-call-stack f)
-             (wrap-convenience-mappings))
-         (select-keys ctx allowed-exec-keys)
-         args))
-
-(defn inject-command-middleware
-  [{:as _opts} all-handlers]
-  (reduce (fn [m k]
-            (update m k wrap-command-middleware))
-          all-handlers
-          (keys all-handlers)))
+    :begin-finally (update-in (model/next-command ctx) [:fn-stack fn-idx :finally-depth] inc)
+    :end-finally   (update-in (model/next-command ctx) [:fn-stack fn-idx :finally-depth] dec)))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Processors: Misc
@@ -563,17 +364,17 @@
 
 (defn process-begin-form
   [{:keys [form-depth] :as ctx}]
-  (default-update ctx [:form-depth (inc form-depth)]))
+  (model/default-update ctx [:form-depth (inc form-depth)]))
 
 (defn process-end-form
   [{:keys [form-depth] :as ctx}]
-  (default-update ctx [:form-depth (dec form-depth)]))
+  (model/default-update ctx [:form-depth (dec form-depth)]))
 
 (defn process-assoc-state
   [{:keys [fn-idx] :as ctx}]
   (let [kvs (:kvs (first (:commands ctx)))]
     (-> ctx
-        next-command
+        model/next-command
         (update-in [:fn-stack fn-idx :state]
                    ;; NOTE: not sure about merging state on top of the kvs
                    ;; seems counter-intuitive, but probably fine
@@ -583,7 +384,7 @@
   [ctx]
   (let [props (:props (first (:commands ctx)))
         ctx*  (apply assoc ctx (apply concat (seq props)))]
-    (next-command ctx*)))
+    (model/next-command ctx*)))
 
 (defn process-test-hook
   [ctx]
@@ -594,7 +395,7 @@
   "Example use case for test hook: "
   (let [f (fn [{:keys [fn-idx] :as ctx}]
             (-> ctx
-                next-command
+                model/next-command
                 (assoc-in [:fn-stack fn-idx :is-throwing?] true)))
         test-hook {:cmd :test-hook :hook-fn f}
         cmds (ptg/create-commands '(+ 1 1))
@@ -608,8 +409,7 @@
 
 (defn create-command-handlers
   []
-  (inject-command-middleware
-   {}
+  (middleware/inject-handlers
    {:begin-form       process-begin-form
     :end-form         process-end-form
     :stack-push-frame process-stack-push-frame
@@ -630,8 +430,8 @@
     :begin-finally    process-finally
     :end-finally      process-finally
     ;; --------------------------------------------------------------------------
-    :intern-var       process-no-op ;; TODO: fix
-    :recur-target     process-no-op ;; TODO: fix
+    :intern-var       model/process-no-op ;; TODO: fix?
+    :recur-target     model/process-no-op ;; TODO: fix?
     ;; --------------------------------------------------------------------------
     :assoc-state      process-assoc-state
     :set-context      process-set-context
@@ -657,7 +457,7 @@
                        (constantly false))
          command-handlers (create-command-handlers)
          commands* commands
-         ctx* (new-exec-ctx commands*)]
+         ctx* (model/new-exec-ctx commands*)]
      (loop [{:keys [cmd-counter fn-idx] :as ctx} ctx*]
        (let [{:keys [commands] :as _fctx} (get-in ctx [:fn-stack fn-idx])
              ;; _ (println (pr-str (first command-history)))
@@ -705,7 +505,7 @@
   (let [command-handlers (create-command-handlers)]
     (cond
       (seq? input)
-      (ctx-seq (new-exec-ctx input))
+      (ctx-seq (model/new-exec-ctx input))
       (map? input)
       (cons input (lazy-seq
                    (let [fctx (get-in input [:fn-stack (:fn-idx input)])
