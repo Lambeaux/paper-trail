@@ -7,11 +7,12 @@
 ;; You must not remove this notice, or any other, from this software.
 (ns lambeaux.paper-trail.impl.executor
   (:require [clojure.set :as set]
+            [lambeaux.paper-trail.impl.call-stack :as stack]
             [lambeaux.paper-trail.impl.generator :as ptg]
             [lambeaux.paper-trail.impl.util :as ptu]
             [lambeaux.paper-trail.impl.lib :refer [assert*]]
             [lambeaux.paper-trail :as-alias pt])
-  (:import [clojure.lang IObj IPending LazySeq ArityException]))
+  (:import [clojure.lang LazySeq ArityException]))
 
 (defn disallow-overlap!
   [& keysets]
@@ -111,110 +112,6 @@
 ;; Processors: Call Stack
 ;; ------------------------------------------------------------------------------------------------
 
-(defn box-type [this] (. this boxType))
-(defn box-value [this] (. this boxValue))
-(defn box-meta [this] (. this boxMeta))
-
-(deftype StackBox [boxType boxValue boxMeta]
-  IObj
-  (meta [this]
-    (box-meta this))
-  (withMeta [this m]
-    (new StackBox (box-type this) (box-value this) m)))
-
-(defn new-box
-  ([bv] (new-box nil bv))
-  ([bt bv] (new StackBox bt bv nil)))
-
-(defmethod print-method StackBox
-  [this writer]
-  (let [class-str (.getName (class (box-value this)))]
-    (.write writer (case (box-type this)
-                     :unrealized (str "#stack.unrealized[" class-str "]")
-                     :unhandled  (str "#stack.unhandled[" class-str "]")
-                     (str "#stack.val[" (box-value this) "]")))))
-
-(defn val->unrealized [v] (new-box :unrealized v))
-(defn val->unhandled [v] (new-box :unhandled v))
-
-(defn is-realized-val?
-  [obj]
-  (if (and (instance? StackBox obj)
-           (= :unrealized (box-type obj)))
-    false
-    (if-not (instance? IPending obj)
-      true
-      (realized? obj))))
-
-(defn is-stack-frame?
-  [obj]
-  (boolean (and (vector? obj) (::pt/stack-frame? (meta obj)))))
-
-(defn stack-frame-push
-  [call-stack]
-  (conj call-stack (with-meta [] {::pt/stack-frame? true})))
-
-(defn stack-frame-pop
-  [call-stack]
-  (let [frame? (is-stack-frame? (peek call-stack))]
-    (if frame?
-      (pop call-stack)
-      (throw (IllegalStateException.
-              (str "No valid stack frame to pop: " (pr-str call-stack)))))))
-
-(defn stack-val-unwrap
-  [obj]
-  (if-not (instance? StackBox obj)
-    obj
-    (box-value obj)))
-
-;; TODO: when it comes to val->unhandled, probably update from 'Exception' to 'Throwable'
-(defn stack-val-wrap
-  [obj]
-  (let [total-meta (merge {::pt/is-evaled? true} (meta obj))]
-    (with-meta
-      (cond
-        (not (is-realized-val? obj)) (val->unrealized obj)
-        (instance? Exception obj) (val->unhandled obj)
-        :else (new-box obj))
-      total-meta)))
-
-(defn stack-peek
-  [call-stack]
-  (let [frame-or-val (peek call-stack)
-        frame? (is-stack-frame? frame-or-val)]
-    (if-not frame?
-      (stack-val-unwrap frame-or-val)
-      (stack-val-unwrap (peek frame-or-val)))))
-
-(defn stack-peek-frame
-  [call-stack]
-  (let [frame-or-val (peek call-stack)
-        frame? (is-stack-frame? frame-or-val)]
-    (if frame?
-      (mapv stack-val-unwrap frame-or-val)
-      (throw (IllegalStateException.
-              (str "No valid stack frame to peek: " (pr-str call-stack)))))))
-
-(defn stack-push
-  [call-stack obj]
-  (let [frame? (is-stack-frame? (peek call-stack))
-        result (stack-val-wrap obj)]
-    (if-not frame?
-      (conj call-stack result)
-      (conj (pop call-stack)
-            (conj (peek call-stack) result)))))
-
-(defn stack-push-resolve
-  ([call-stack]
-   (stack-push-resolve call-stack (stack-peek call-stack)))
-  ([call-stack obj]
-   (let [frame? (is-stack-frame? (peek call-stack))]
-     (if frame?
-       (stack-push (pop call-stack) obj)
-       (throw (IllegalStateException.
-               (str "No valid stack frame to resolve: " (pr-str call-stack))))))))
-
 (defn stack-find
   [{:keys [fn-idx call-stack-primary call-stack-finally] :as ctx}]
   (let [[stack-name _stack-to-use] (if (zero? (get-in ctx [:fn-stack fn-idx :finally-depth]))
@@ -224,13 +121,13 @@
 
 (defn process-stack-push-frame
   [{:keys [call-stack] :as ctx}]
-  (default-update ctx [:call-stack (stack-frame-push call-stack)]))
+  (default-update ctx [:call-stack (stack/frame-push call-stack)]))
 
 (defn process-stack-pop-frame
   [{:keys [is-throwing? is-finally? call-stack] :as ctx}]
   (if (or is-finally? (not is-throwing?))
     (next-command ctx)
-    (default-update ctx [:call-stack (stack-frame-pop call-stack)])))
+    (default-update ctx [:call-stack (stack/frame-pop call-stack)])))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Processors: Function Stack
@@ -259,7 +156,7 @@
   [ctx result]
   (let [convey-fn (fn [{:keys [call-stack] :as ctx*}]
                     (default-update
-                     ctx* false [:call-stack (stack-push-resolve call-stack result)]))]
+                     ctx* false [:call-stack (stack/push-resolved-val call-stack result)]))]
     (with-middleware convey-fn ctx)))
 
 (defn fn-stack-pop
@@ -268,10 +165,10 @@
     (if (zero? fn-idx)
       (if is-throwing?
         (throw throwing-ex)
-        (stack-peek call-stack))
+        (stack/peek-val call-stack))
       (if is-throwing?
         (fn-stack-do-pop* ctx)
-        (let [return-val (stack-peek call-stack)]
+        (let [return-val (stack/peek-val call-stack)]
           (-> ctx
               (fn-stack-do-pop*)
               (fn-stack-resolve* return-val)))))))
@@ -314,7 +211,7 @@
         the-fn* (with-meta (partial the-fn (str the-fn))
                   {::pt/fn-impl true})]
     (-> ctx
-        (default-update [:call-stack (stack-push call-stack the-fn*)]))))
+        (default-update [:call-stack (stack/push-val call-stack the-fn*)]))))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Processors: Function Handlers
@@ -343,7 +240,7 @@
   (let [[ex? result] (try
                        (let [return (apply fn-impl
                                            (map (map-impl-fn temp-ctx)
-                                                (stack-peek-frame call-stack)))]
+                                                (stack/peek-frame call-stack)))]
                          ;; [false (if-not (seq? return) return (doall return))]
                          ;; Turns out, requiring doall here was a red herring. The real
                          ;; failure was occurring down below when trying to with-meta a
@@ -367,14 +264,14 @@
         (default-update
          [:call-stack (if ex?
                         call-stack
-                        (stack-push-resolve call-stack result))]))))
+                        (stack/push-resolved-val call-stack result))]))))
 
 (defn invoke-interpreted-fn
   [{:keys [call-stack] :as ctx} fn-impl]
   (apply fn-impl
          (new-call-ctx ctx)
          (map (map-impl-fn temp-ctx)
-              (stack-peek-frame call-stack))))
+              (stack/peek-frame call-stack))))
 
 (defn process-invoke-fn
   [{:keys [source-scope impl-scope] [cmd & _] :commands :as ctx}]
@@ -393,13 +290,13 @@
       (assoc
        :is-throwing? true
        :is-finally? false
-       :throwing-ex (stack-peek call-stack))
+       :throwing-ex (stack/peek-val call-stack))
       ;; todo: fix default-update's inability to handle an empty vector of kvs
       (default-update [:call-stack call-stack])))
 
 (defn process-invoke-do
   [{:keys [call-stack] :as ctx}]
-  (default-update ctx [:call-stack (stack-push-resolve call-stack)]))
+  (default-update ctx [:call-stack (stack/push-resolved-val call-stack)]))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Processors: Terminal Value Handlers
@@ -417,7 +314,7 @@
                        ::pt/nil nil
                        ::pt/false false
                        scalar-value)]
-    (default-update ctx [:call-stack (stack-push call-stack scalar-value)])))
+    (default-update ctx [:call-stack (stack/push-val call-stack scalar-value)])))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Processors: State & Scope Handlers
@@ -429,7 +326,7 @@
     :as ctx}]
   ;; todo: should we pop the call-stack in this scenario?
   ;; no, we should not (but awaiting test case verification)
-  (default-update ctx [:state (assoc state (:state-id cmd) (stack-peek call-stack))]))
+  (default-update ctx [:state (assoc state (:state-id cmd) (stack/peek-val call-stack))]))
 
 (defn process-bind-name
   [{:keys [state call-stack source-scope impl-scope]
@@ -437,9 +334,9 @@
     :as ctx}]
   (let [val-to-bind  (case bind-from
                        :command-value value
-                       :call-stack (stack-peek call-stack)
+                       :call-stack (stack/peek-val call-stack)
                        :state (get state state-id))
-        val-to-bind  (if-not (is-realized-val? val-to-bind)
+        val-to-bind  (if-not (stack/is-realized-val? val-to-bind)
                        val-to-bind
                        (case val-to-bind
                          nil ::pt/nil
@@ -450,7 +347,7 @@
                        [:source-scope (update source-scope bind-id #(conj % val-to-bind))])]
     (default-update ctx (if (not= :call-stack bind-from)
                           keyval-pairs
-                          (conj keyval-pairs :call-stack (stack-frame-pop call-stack))))))
+                          (conj keyval-pairs :call-stack (stack/frame-pop call-stack))))))
 
 (defn process-unbind-name
   [{:keys [source-scope impl-scope]
