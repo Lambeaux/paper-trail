@@ -89,7 +89,7 @@
    (copy-scope-cmds false keyvals))
   ([impl? keyvals]
    (map (fn [[k v]]
-          {:cmd :bind-name
+          {:action :bind-name
            :bind-id k
            :bind-from :command-value
            :value (peek v)
@@ -108,7 +108,7 @@
                          ks (map #(str "arg-" %) (range arg-count))
                          kvs (into {} (map vector ks args))]
                      (if-let [{:keys [commands] :as _metainf} (get arities arg-count)]
-                       (let [all-cmds (concat [{:cmd :assoc-state :kvs kvs}] scope-cmds commands)]
+                       (let [all-cmds (concat [{:action :assoc-state :kvs kvs}] scope-cmds commands)]
                          (case call-type
                            :fn-in-execute (execute all-cmds)
                            :fn-on-stack   (fn-stack-push exec-ctx all-cmds)))
@@ -304,7 +304,7 @@
     [{:keys [idx] :as cmd} & cmds] :commands
     :as ctx}]
   (let [cmds-to-replay (take-while (fn [old-cmd]
-                                     (not (and (= :recur-target (:cmd old-cmd))
+                                     (not (and (= :recur-target (:action old-cmd))
                                                (= idx (:idx old-cmd)))))
                                    command-history)
         kvs [:commands (concat (reverse cmds-to-replay) [cmd] cmds)
@@ -353,7 +353,7 @@
 
 (defn process-finally
   [{:keys [fn-idx commands] :as ctx}]
-  (case (:cmd (first commands))
+  (case (:action (first commands))
     ;; todo: the fn-stack is still leaking into the context, clean it up
     :begin-finally (update-in (model/next-command ctx) [:fn-stack fn-idx :finally-depth] inc)
     :end-finally   (update-in (model/next-command ctx) [:fn-stack fn-idx :finally-depth] dec)))
@@ -397,7 +397,7 @@
             (-> ctx
                 model/next-command
                 (assoc-in [:fn-stack fn-idx :is-throwing?] true)))
-        test-hook {:cmd :test-hook :hook-fn f}
+        test-hook {:action :test-hook :hook-fn f}
         cmds (ptg/create-commands '(+ 1 1))
         cmds* (concat (butlast cmds)
                       [test-hook (last cmds)])]
@@ -462,7 +462,7 @@
        (let [{:keys [commands] :as _fctx} (get-in ctx [:fn-stack fn-idx])
              ;; _ (println (pr-str (first command-history)))
              idx (inc @cmd-counter)
-             action (:cmd (first commands))
+             action (:action (first commands))
              h (get command-handlers action)]
          ;; (println "Command Loop [" idx "] " action " " (pr-str (stack-find ctx)))
          (cond
@@ -482,7 +482,7 @@
     (cons context
           (lazy-seq
            (let [fctx (get-fctx context)
-                 h (get handlers (:cmd (first (:commands fctx))))]
+                 h (get handlers (:action (first (:commands fctx))))]
              (when h
                (execute-seq handlers (h context)))))))
 
@@ -510,7 +510,7 @@
       (cons input (lazy-seq
                    (let [fctx (get-in input [:fn-stack (:fn-idx input)])
                          h (get command-handlers
-                                (:cmd (first (:commands fctx))))]
+                                (:action (first (:commands fctx))))]
                      (when h
                        (ctx-seq (h input))))))
       :else

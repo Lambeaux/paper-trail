@@ -1,1 +1,4 @@
-{:extra-indents {lambeaux.paper-trail.conf-test/forms->test [[:block 1]]}}
+{:extra-indents {lambeaux.paper-trail.repl/spit-commands              [[:block 1]]
+                 lambeaux.paper-trail.impl.generator/action->command  [[:block 1]]
+                 lambeaux.paper-trail.impl.generator/action->commands [[:block 1]]
+                 lambeaux.paper-trail.conf-test/forms->test           [[:block 1]]}}
