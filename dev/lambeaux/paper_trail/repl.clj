@@ -23,7 +23,8 @@
 
 (defmacro with-std-out
   [& body]
-  `(binding [*out* (java.io.PrintWriter. System/out)]
+  `(binding [*out* (java.io.PrintWriter. System/out)
+             *err* (java.io.PrintWriter. System/err)]
      ~@body))
 
 #_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
