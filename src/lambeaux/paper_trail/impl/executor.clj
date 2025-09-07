@@ -6,9 +6,9 @@
 ;; the terms of this license.
 ;; You must not remove this notice, or any other, from this software.
 (ns lambeaux.paper-trail.impl.executor
-  (:require [lambeaux.paper-trail.impl.call-stack :as stack]
-            [lambeaux.paper-trail.impl.data-model :as model]
-            [lambeaux.paper-trail.impl.middleware :as middleware]
+  (:require [lambeaux.paper-trail.impl.executor.call-stack :as stack]
+            [lambeaux.paper-trail.impl.executor.data-model :as model]
+            [lambeaux.paper-trail.impl.executor.middleware :as middleware]
             [lambeaux.paper-trail.impl.generator :as ptg]
             [lambeaux.paper-trail.impl.util :as ptu]
             [lambeaux.paper-trail.impl.lib :refer [assert*]]

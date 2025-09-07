@@ -1,4 +1,4 @@
-(ns lambeaux.paper-trail.impl.data-model
+(ns lambeaux.paper-trail.impl.executor.data-model
   (:require [lambeaux.paper-trail.impl.util :as ptu]
             [lambeaux.paper-trail.impl.lib :refer [assert*]]))
 

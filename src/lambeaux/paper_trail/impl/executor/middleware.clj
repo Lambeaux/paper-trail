@@ -1,5 +1,5 @@
-(ns lambeaux.paper-trail.impl.middleware
-  (:require [lambeaux.paper-trail.impl.data-model :as model]
+(ns lambeaux.paper-trail.impl.executor.middleware
+  (:require [lambeaux.paper-trail.impl.executor.data-model :as model]
             [lambeaux.paper-trail.impl.util :as ptu]))
 
 ;; ------------------------------------------------------------------------------------------------

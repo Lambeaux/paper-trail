@@ -7,7 +7,7 @@
 ;; You must not remove this notice, or any other, from this software.
 (ns lambeaux.paper-trail.repl
   (:require [lambeaux.paper-trail.impl.core :as impl]
-            [lambeaux.paper-trail.impl.middleware :as middleware]))
+            [lambeaux.paper-trail.impl.executor.middleware :as middleware]))
 
 (def default-requires
   ['[lambeaux.paper-trail.repl :as r]
@@ -15,9 +15,9 @@
    '[lambeaux.paper-trail.impl.generator :as ptg]
    '[lambeaux.paper-trail.impl.util :as ptu]
    '[lambeaux.paper-trail.impl.executor :as pte]
-   '[lambeaux.paper-trail.impl.call-stack :as stack]
-   '[lambeaux.paper-trail.impl.data-model :as model]
-   '[lambeaux.paper-trail.impl.middleware :as middleware]
+   '[lambeaux.paper-trail.impl.executor.call-stack :as stack]
+   '[lambeaux.paper-trail.impl.executor.data-model :as model]
+   '[lambeaux.paper-trail.impl.executor.middleware :as middleware]
    '[lambeaux.paper-trail.conf-test :as ptconf]])
 
 (defn require-pt

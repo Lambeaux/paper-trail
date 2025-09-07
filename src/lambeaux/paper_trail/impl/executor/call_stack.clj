@@ -5,7 +5,7 @@
 ;; By using this software in any fashion, you are agreeing to be bound by
 ;; the terms of this license.
 ;; You must not remove this notice, or any other, from this software.
-(ns lambeaux.paper-trail.impl.call-stack
+(ns lambeaux.paper-trail.impl.executor.call-stack
   (:require [lambeaux.paper-trail :as-alias pt])
   (:import [clojure.lang IObj IPending]))
 
