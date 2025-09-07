@@ -6,7 +6,8 @@
 ;; the terms of this license.
 ;; You must not remove this notice, or any other, from this software.
 (ns lambeaux.paper-trail.repl
-  (:require [lambeaux.paper-trail.impl.core :as impl]))
+  (:require [lambeaux.paper-trail.impl.core :as impl]
+            [lambeaux.paper-trail.impl.executor :as pte]))
 
 (def default-requires
   ['[lambeaux.paper-trail.repl :as r]
@@ -49,9 +50,17 @@
            {:commands (take 15 commands)})))
 
 #_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
-(defn with-eval-to
-  [idx form]
-  (tiny-context (impl/evaluate-to idx form)))
+(defn with-executor-middleware
+  [f & args]
+  (let [f* (pte/wrap-command-middleware f)]
+    (apply f* args)))
+
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
+(defn with-eval
+  ([form]
+   (impl/evaluate form))
+  ([idx form]
+   (tiny-context (impl/evaluate-to idx form))))
 
 (comment
 

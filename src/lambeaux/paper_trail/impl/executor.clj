@@ -217,12 +217,17 @@
 ;; ------------------------------------------------------------------------------------------------
 
 (defn push-fn-stack
-  [{:keys [fn-idx fn-stack] :as ctx} commands]
-  (assoc ctx :fn-idx (inc fn-idx) :fn-stack (conj fn-stack (new-fn-ctx commands))))
+  [ctx commands]
+  (-> ctx
+      (update :fn-idx inc)
+      (update :fn-stack #(conj % (new-fn-ctx commands)))))
 
 (defn pop-fn-stack*
-  [{:keys [fn-idx fn-stack] :as ctx}]
-  (assoc ctx :fn-idx (dec fn-idx) :fn-stack (pop fn-stack)))
+  [{:keys [fn-idx] :as ctx}]
+  (-> ctx
+      (update :fn-idx dec)
+      (update :fn-stack pop)
+      (next-command)))
 
 ;; todo: create a proper stack abstraction so this code copied from the middleware is no longer
 ;; necessary; the issue here is once we pop-fn-stack, we're now on a fn-idx that hasn't been augmented
