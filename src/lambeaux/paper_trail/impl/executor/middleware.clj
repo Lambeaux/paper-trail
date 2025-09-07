@@ -17,10 +17,10 @@
 
 (defn wrap-throwing
   [handler]
-  (fn [{:keys [is-throwing? is-finally?] [{:keys [cmd]}] :commands :as ctx}]
+  (fn [{:keys [is-throwing? is-finally?] [{:keys [action]}] :commands :as ctx}]
     (if (and is-throwing?
              (not is-finally?)
-             (not (allowed-op-when-throwing? cmd)))
+             (not (allowed-op-when-throwing? action)))
       (model/process-no-op ctx)
       (handler ctx))))
 
