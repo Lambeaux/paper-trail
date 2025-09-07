@@ -542,16 +542,14 @@
           (swap! a inc)
           @a))))
 
-;; ** fix fn handling to capture (closure) scope where defined
-;; ** fix invoke to operate left-to-right
 (deftest ^:core test-eval-left-to-right
-  #_(forms->test "Test forms evaluate left-to-right"
-      (let [state (atom (list 3 5))
-            peek-pop! (fn []
-                        (let [the-val (peek (deref state))]
-                          (swap! state pop)
-                          the-val))]
-        (- (* 2 (peek-pop!)) (peek-pop!)))))
+  (forms->test "Test forms evaluate left-to-right"
+    (let [state (atom (list 3 5))
+          peek-pop! (fn []
+                      (let [the-val (peek (deref state))]
+                        (swap! state pop)
+                        the-val))]
+      (- (* 2 (peek-pop!)) (peek-pop!)))))
 
 (deftest ^:core test-anonymous-functions
   #_(forms->test "Test invoke (fn) directly"

@@ -1,15 +1,18 @@
 (ns lambeaux.paper-trail.impl.lib)
 
+(def ^:dynamic *assert-gen*
+  (boolean true))
+
 (defmacro assert*
   "Like clojure.core/assert but throws RuntimeException instead of AssertionError.
    This is useful when you want your assertions to be handled by your default error
    handling / exception catching logic."
   ([x]
-   (when *assert*
+   (when *assert-gen*
      `(when-not ~x
         (throw (new RuntimeException (str "Assert failed: " (pr-str '~x)))))))
   ([x message]
-   (when *assert*
+   (when *assert-gen*
      `(when-not ~x
         (throw (new RuntimeException (str "Assert failed: " ~message "\n" (pr-str '~x))))))))
 

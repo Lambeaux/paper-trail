@@ -13,6 +13,13 @@
             [lambeaux.paper-trail :as-alias pt])
   (:import [clojure.lang IObj IPending LazySeq ArityException]))
 
+(defn disallow-overlap!
+  [& keysets]
+  (let [overlap (apply set/intersection keysets)]
+    (assert* (empty? overlap)
+             (str "There must be no overlap between the keysets but found "
+                  (pr-str overlap)))))
+
 ;; ------------------------------------------------------------------------------------------------
 ;; Processors: Context Builders
 ;; ------------------------------------------------------------------------------------------------
@@ -53,6 +60,11 @@
    :is-finally? false
    :throwing-ex nil
    :enable-try-catch-support? *enable-try-catch-support*})
+
+(def allowed-fn-keys (into #{} (keys (new-fn-ctx nil))))
+(def allowed-exec-keys (into #{} (keys (new-exec-ctx nil))))
+
+(disallow-overlap! allowed-exec-keys allowed-fn-keys)
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Processors: Context Updaters
@@ -203,6 +215,13 @@
        (throw (IllegalStateException.
                (str "No valid stack frame to resolve: " (pr-str call-stack))))))))
 
+(defn stack-find
+  [{:keys [fn-idx call-stack-primary call-stack-finally] :as ctx}]
+  (let [[stack-name _stack-to-use] (if (zero? (get-in ctx [:fn-stack fn-idx :finally-depth]))
+                                     [:call-stack-primary call-stack-primary]
+                                     [:call-stack-finally call-stack-finally])]
+    (get-in ctx [:fn-stack fn-idx stack-name])))
+
 (defn process-stack-push-frame
   [{:keys [call-stack] :as ctx}]
   (default-update ctx [:call-stack (stack-frame-push call-stack)]))
@@ -217,52 +236,45 @@
 ;; Processors: Function Stack
 ;; ------------------------------------------------------------------------------------------------
 
-(defn push-fn-stack
+(declare with-middleware)
+
+;; Note: probably don't need the middleware for a push, only exec-ctx fields are relevant
+(defn fn-stack-push
   [ctx commands]
   (-> ctx
       (update :fn-idx inc)
       (update :fn-stack #(conj % (new-fn-ctx commands)))))
 
-(defn pop-fn-stack*
+(defn fn-stack-do-pop*
   [{:keys [fn-idx] :as ctx}]
   (assert* (> fn-idx 0)
            (str "Fn stack cannot be popped unless fn-idx > 0 but fn-idx is "
                 fn-idx))
-  (-> ctx
-      (update :fn-idx dec)
-      (update :fn-stack pop)
-      (next-command)))
+  (let [ctx* (-> ctx
+                 (update :fn-idx dec)
+                 (update :fn-stack pop))]
+    (with-middleware next-command ctx*)))
 
-;; todo: create a proper stack abstraction so this code copied from the middleware is no longer
-;; necessary; the issue here is once we pop-fn-stack, we're now on a fn-idx that hasn't been augmented
-;; with convenience bindings + other middleware housekeeping, so we have to handle things the verbose way
-(defn convey-resolved-fn-result
-  [{:keys [fn-idx] :as ctx} result]
-  (let [{:keys [call-stack-primary call-stack-finally finally-depth]} (get-in ctx [:fn-stack fn-idx])
-        [stack-name stack-to-use] (if (zero? finally-depth)
-                                    [:call-stack-primary call-stack-primary]
-                                    [:call-stack-finally call-stack-finally])
-        new-stack (stack-push-resolve stack-to-use result)]
-    (default-update
-     ctx false [:call-stack new-stack stack-name new-stack])))
+(defn fn-stack-resolve*
+  [ctx result]
+  (let [convey-fn (fn [{:keys [call-stack] :as ctx*}]
+                    (default-update
+                     ctx* false [:call-stack (stack-push-resolve call-stack result)]))]
+    (with-middleware convey-fn ctx)))
 
-;; todo: this call occurs outside command handlers, so we also have no middleware benefits for this fn
-(defn pop-fn-stack
+(defn fn-stack-pop
   [{:keys [fn-idx throwing-ex is-throwing?] :as ctx}]
-  (let [{:keys [call-stack-primary call-stack-finally finally-depth]} (get-in ctx [:fn-stack fn-idx])
-        [_ stack-to-use] (if (zero? finally-depth)
-                           [:call-stack-primary call-stack-primary]
-                           [:call-stack-finally call-stack-finally])]
+  (let [call-stack (stack-find ctx)]
     (if (zero? fn-idx)
       (if is-throwing?
         (throw throwing-ex)
-        (stack-peek stack-to-use))
+        (stack-peek call-stack))
       (if is-throwing?
-        (pop-fn-stack* ctx)
-        (let [return (stack-peek stack-to-use)]
+        (fn-stack-do-pop* ctx)
+        (let [return-val (stack-peek call-stack)]
           (-> ctx
-              (pop-fn-stack*)
-              (convey-resolved-fn-result return)))))))
+              (fn-stack-do-pop*)
+              (fn-stack-resolve* return-val)))))))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Processors: Function Objects
@@ -297,7 +309,7 @@
                        (let [all-cmds (concat [{:cmd :assoc-state :kvs kvs}] scope-cmds commands)]
                          (case call-type
                            :fn-in-execute (execute all-cmds)
-                           :fn-on-stack   (push-fn-stack exec-ctx all-cmds)))
+                           :fn-on-stack   (fn-stack-push exec-ctx all-cmds)))
                        (throw (ArityException. arg-count obj-name))))))
         the-fn* (with-meta (partial the-fn (str the-fn))
                   {::pt/fn-impl true})]
@@ -606,11 +618,8 @@
   [handler]
   (fn [{:keys [fn-idx] :as ctx}]
     (let [fctx (get-in ctx [:fn-stack fn-idx])]
-      (let [overlap (set/intersection (into #{} (keys ctx))
-                                      (into #{} (keys fctx)))]
-        (assert* (empty? overlap)
-                 (str "There must be no key overlap between ctx and fctx but found "
-                      (pr-str overlap))))
+      (disallow-overlap! (into #{} (keys ctx))
+                         (into #{} (keys fctx)))
       (apply dissoc
              (handler (merge ctx fctx))
              (keys fctx)))))
@@ -628,19 +637,26 @@
 (defn wrap-command-middleware
   ([handler]
    (wrap-command-middleware true handler))
-  ([_wrap-throwing? handler]
+  ([wrap-infinite? handler]
    (cond-> handler
-     true wrap-throwing
-     true wrap-call-stack
-     true wrap-check-not-infinite
-     true wrap-convenience-mappings
-     true wrap-uncaught-ex)))
+     true           wrap-throwing
+     true           wrap-call-stack
+     wrap-infinite? wrap-check-not-infinite
+     true           wrap-convenience-mappings
+     true           wrap-uncaught-ex)))
+
+;; (wrap-command-middleware false f)
+(defn with-middleware
+  [f ctx & args]
+  (apply (-> (wrap-call-stack f)
+             (wrap-convenience-mappings))
+         (select-keys ctx allowed-exec-keys)
+         args))
 
 (defn inject-command-middleware
-  [{:keys [wrap-throwing?] :as _opts} all-handlers]
+  [{:as _opts} all-handlers]
   (reduce (fn [m k]
-            (update m k (partial wrap-command-middleware
-                                 wrap-throwing?)))
+            (update m k wrap-command-middleware))
           all-handlers
           (keys all-handlers)))
 
@@ -740,7 +756,7 @@
   ([commands stop-idx]
    (let [stop-early? (if (and (int? stop-idx)
                               (or (zero? stop-idx) (pos-int? stop-idx)))
-                       (partial = stop-idx)
+                       (partial <= stop-idx)
                        (constantly false))
          command-handlers (create-command-handlers)
          commands* commands
@@ -749,14 +765,16 @@
        (let [{:keys [commands] :as _fctx} (get-in ctx [:fn-stack fn-idx])
              ;; _ (println (pr-str (first command-history)))
              idx (inc @cmd-counter)
-             h (get command-handlers (:cmd (first commands)))]
+             action (:cmd (first commands))
+             h (get command-handlers action)]
+         ;; (println "Command Loop [" idx "] " action " " (pr-str (stack-find ctx)))
          (cond
            ;; todo: when you support drilling down into function calls, fix
            ;; this to pop fns off the fn-stack and only throw when none remain
            (stop-early? idx) ctx
            h                 (recur (h ctx))
-           (> fn-idx 0)      (recur (pop-fn-stack ctx))
-           :else             (pop-fn-stack ctx)))))))
+           (> fn-idx 0)      (recur (fn-stack-pop ctx))
+           :else             (fn-stack-pop ctx)))))))
 
 #_(defn get-fctx
     [context]
