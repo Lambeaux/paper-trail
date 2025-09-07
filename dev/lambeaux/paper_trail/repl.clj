@@ -6,8 +6,10 @@
 ;; the terms of this license.
 ;; You must not remove this notice, or any other, from this software.
 (ns lambeaux.paper-trail.repl
-  (:require [lambeaux.paper-trail.impl.core :as impl]
-            [lambeaux.paper-trail.impl.executor.middleware :as middleware]))
+  (:require [clojure.pprint :as pp]
+            [lambeaux.paper-trail.impl.core :as impl]
+            [lambeaux.paper-trail.impl.executor.middleware :as middleware]
+            [lambeaux.paper-trail.impl.generator :as ptg]))
 
 (def default-requires
   ['[lambeaux.paper-trail.repl :as r]
@@ -65,6 +67,21 @@
    (impl/evaluate form))
   ([idx form]
    (tiny-context (impl/evaluate-to idx form))))
+
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
+(defn spit-commands
+  ([fname form]
+   (spit-commands fname identity form))
+  ([fname xform form]
+   (let [xform* (comp #(into (sorted-map) (seq %)) xform)
+         spit-seq (fn [fname* coll]
+                    (doseq [item coll]
+                      (let [content* (with-out-str (pp/pprint (xform* item)))]
+                        (spit fname* content* :append true))))]
+     (if-let [working-dir (System/getProperty "user.dir")]
+       (spit-seq (str working-dir "/.tmp/" (name fname) ".edn")
+                 (ptg/create-commands form))
+       (throw (IllegalStateException. "No user.dir system property provided"))))))
 
 (comment
 
