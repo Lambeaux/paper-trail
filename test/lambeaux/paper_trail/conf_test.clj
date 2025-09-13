@@ -578,22 +578,39 @@
           (mapv (fn [i] (hash-map :seq (into (vector) (range i))))
                 (range 1 6)))))
 
-(comment "List macros in clojure.core alphabetically"
-         (->> (the-ns 'clojure.core)
-              (ns-publics)
-              (vals)
-              (map meta)
-              (filter :macro)
-              (map :name)
-              (sort)
-              (take 30)))
+(comment
+  "List macros in clojure.core alphabetically"
+  (->> (the-ns 'clojure.core)
+       (ns-publics)
+       (vals)
+       (map meta)
+       (filter :macro)
+       (map :name)
+       (sort)
+       (take 30)))
 
-(comment "Macros that still need tests"
-         ..
-         amap
-         areduce
-         assert
-         bound-fn)
+(comment
+  "Macros that still need tests"
+  ..
+  amap
+  areduce
+  assert
+  bound-fn
+  delay
+  "Macros we likely won't test (for now)"
+  declare
+  definline
+  definterface
+  defmacro
+  defmethod
+  defmulti
+  defn
+  defn-
+  defonce
+  defprotocol
+  defrecord
+  defstruct
+  deftype)
 
 ;; Used for testing (binding ...) in below tests
 (def ^:dynamic *test-counter* 0)
@@ -683,6 +700,13 @@
           (:k $)
           (mapv inc $))))
     ;; ---------------------------------------------------------------------------
+    (testing "that fulfill misc goals: "
+      (forms->test "comment"
+        (comment)
+        (comment 1)
+        (comment 1 2)
+        (comment 1 2 3)))
+    ;; ---------------------------------------------------------------------------
     (testing "that involve control flow: "
       (forms->test "if-not"
         (if-not (= 1 1) :hi)
@@ -729,6 +753,15 @@
         (or false)
         (or false false)
         (or false false false))
+      (forms->test "case"
+        (case)
+        ;; TODO: cannot find fn 'case*' during evaluation
+        #_(case 2)
+        #_(case 2 0)
+        #_(case 2 1 -1)
+        #_(case 2 1 -1 0)
+        #_(case 2 1 -1 2 -2)
+        #_(case 2 1 -1 2 -2 0))
       (forms->test "cond"
         (cond)
         (cond (= 1 1) :result)
@@ -749,4 +782,14 @@
               :else   3)
         (cond (= 1 2) 1
               (= 1 2) 2
-              :else   3)))))
+              :else   3))
+      (forms->test "condp"
+        (condp)
+        ;; TODO: trying to invoke-fn a java.lang.IllegalArgumentException. (interop not done)
+        #_(condp = 2)
+        (condp = 2 0)
+        ;; TODO: incorrect result, getting -1 instead of 0 or error
+        #_(condp = 2 1 -1)
+        #_(condp = 2 1 -1 0)
+        #_(condp = 2 1 -1 2 -2)
+        #_(condp = 2 1 -1 2 -2 0)))))
