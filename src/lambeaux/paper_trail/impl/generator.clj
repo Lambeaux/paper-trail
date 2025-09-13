@@ -221,7 +221,7 @@
                                              :in-macro? in-macro?))
                                          (map #(str "arg-" %) (range (count argdefs)))
                                          argdefs)
-                                    (action->commands :recur-target :idx recur-idx :in-macro? false)
+                                    (action->commands :recur-target :idx recur-idx :in-macro? in-macro?)
                                     #_(with-implicit-do (form->commands attrs* body))
                                     (->commands ctx* body))]
               (update accum k #(assoc % :commands commands*))))
