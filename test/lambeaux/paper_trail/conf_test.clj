@@ -578,20 +578,175 @@
           (mapv (fn [i] (hash-map :seq (into (vector) (range i))))
                 (range 1 6)))))
 
+(comment "List macros in clojure.core alphabetically"
+         (->> (the-ns 'clojure.core)
+              (ns-publics)
+              (vals)
+              (map meta)
+              (filter :macro)
+              (map :name)
+              (sort)
+              (take 30)))
+
+(comment "Macros that still need tests"
+         ..
+         amap
+         areduce
+         assert
+         bound-fn)
+
+;; Used for testing (binding ...) in below tests
+(def ^:dynamic *test-counter* 0)
+
+;; Used for testing (with-redefs ...) in below tests
+(def test-fn (fn [idx] idx))
+
+#_{:clj-kondo/ignore [:invalid-arity :single-logical-operand]}
 (deftest ^:core test-common-macros
-  (forms->test "Test common macros from clojure.core"
-    (if-not (= 1 2) :hi)
-    (if-not (= 1 1) :hi :bye)
-    (and 1 2 3)
-    (or nil nil 1)
-    (when (= 1 1) :hi)
-    (when (= 1 2) :hi)
-    (cond (= 1 1) :hi
-          (= 1 2) :bye
-          :else   :sigh)
-    (cond (= 1 2) :hi
-          (= 1 1) :bye
-          :else   :sigh)
-    (cond (= 1 2) :hi
-          (= 1 2) :bye
-          :else   :sigh)))
+  (testing "Test common macros from clojure.core"
+    ;; ---------------------------------------------------------------------------
+    (testing "that wrap a body: "
+      (forms->test "binding"
+        ;; TODO: add a way to specify if we expect eval to throw or not 
+        ;; (protect against false positives where the result matched but we didn't cover the intended code path)
+        (binding)
+        (binding [])
+        ;; TODO: match paper trail's exception to the clojure one when a symbol cannot be found
+        ;;   Clojure's flavor: Unable to resolve symbol: *test-counter* in this context (RuntimeException)
+        ;;   PT's current flavor: class clojure.lang.Symbol cannot be cast to class java.lang.Number (ClassCastException)
+        #_(binding [] (inc *test-counter*))
+        ;; TODO: fix lookup of fully qualified symbols (PT gets a NullPointerException)
+        ;;   Call Stack: [#stack.val[lambeaux.paper-trail.conf-test/*test-counter*]]
+        ;;   Next Command: calling (var ...) so need to add support for that
+        #_(binding []
+            (inc lambeaux.paper-trail.conf-test/*test-counter*))
+        #_(binding [lambeaux.paper-trail.conf-test/*test-counter* 1]
+            (inc lambeaux.paper-trail.conf-test/*test-counter*))
+        #_(binding [lambeaux.paper-trail.conf-test/*test-counter* 2]
+            (inc lambeaux.paper-trail.conf-test/*test-counter*))
+        #_(binding [lambeaux.paper-trail.conf-test/*test-counter* 1]
+            (binding [lambeaux.paper-trail.conf-test/*test-counter* 2]
+              (inc lambeaux.paper-trail.conf-test/*test-counter*)))
+        #_(binding [lambeaux.paper-trail.conf-test/*test-counter* 1]
+            (binding [lambeaux.paper-trail.conf-test/*test-counter* 2]
+              (binding [lambeaux.paper-trail.conf-test/*test-counter* 3]
+                (inc lambeaux.paper-trail.conf-test/*test-counter*))))))
+    ;; ---------------------------------------------------------------------------
+    (testing "that involve threading forms: "
+      (forms->test "->"
+        (->)
+        (-> (hash-map))
+        (-> (hash-map) (assoc :k "v"))
+        (-> (hash-map) (assoc :k "v1") (assoc :k "v2"))
+        (-> (hash-map) (assoc :k "v1") (assoc :k "v2") (assoc :k "v3")))
+      (forms->test "cond->"
+        (cond->)
+        (cond-> (hash-map))
+        ;; TODO: add support to ex-comparable for munging out the specifics of CompilerException
+        ;; for example: 'output.calva-repl:171:1' in the :message and :line/:column in the :data
+        ;; (cond-> (hash-map) true)
+        (cond-> (hash-map) true (assoc :k "v"))
+        (cond-> (hash-map) true (assoc :k "v1") true (assoc :k "v2"))
+        (cond-> (hash-map) true (assoc :k "v1") true (assoc :k "v2") true (assoc :k "v3"))
+        (cond-> (hash-map) true (assoc :k "v1") true (assoc :k "v2") false (assoc :k "v3"))
+        (cond-> (hash-map) true (assoc :k "v1") false (assoc :k "v2") false (assoc :k "v3"))
+        (cond-> (hash-map) false (assoc :k "v1") false (assoc :k "v2") false (assoc :k "v3")))
+      (forms->test "->>"
+        (->>)
+        (->> (vector 1 2 3))
+        (->> (vector 1 2 3) (mapv inc))
+        (->> (vector 1 2 3) (mapv inc) (mapv inc))
+        (->> (vector 1 2 3) (mapv inc) (mapv inc) (mapv inc)))
+      (forms->test "cond->>"
+        (cond->>)
+        (cond->> (vector 1 2 3))
+        ;; TODO: add support to ex-comparable for munging out the specifics of CompilerException
+        ;; for example: 'output.calva-repl:171:1' in the :message and :line/:column in the :data
+        ;; (cond->> (vector 1 2 3) true)
+        (cond->> (vector 1 2 3) true (mapv inc))
+        (cond->> (vector 1 2 3) true (mapv inc) true (mapv inc))
+        (cond->> (vector 1 2 3) true (mapv inc) true (mapv inc) true (mapv inc))
+        (cond->> (vector 1 2 3) true (mapv inc) true (mapv inc) false (mapv inc))
+        (cond->> (vector 1 2 3) true (mapv inc) false (mapv inc) false (mapv inc))
+        (cond->> (vector 1 2 3) false (mapv inc) false (mapv inc) false (mapv inc)))
+      (forms->test "as->"
+        (as->)
+        (as-> (+ 1 1))
+        (as-> (+ 1 1) _$)
+        (as-> (hash-map) $ (assoc $ :k "v"))
+        (as-> (hash-map) $ (assoc $ :k "v1") (assoc $ :k "v2"))
+        (as-> (vector 1 2 3) $ (mapv inc $))
+        (as-> (vector 1 2 3) $ (mapv inc $) (mapv inc $))
+        (as-> (hash-map) $
+          (assoc $ :k (vector 10))
+          (update $ :k conj 11)
+          (:k $)
+          (mapv inc $))))
+    ;; ---------------------------------------------------------------------------
+    (testing "that involve control flow: "
+      (forms->test "if-not"
+        (if-not (= 1 1) :hi)
+        (if-not (= 1 2) :hi)
+        (if-not (= 1 1) :hi :bye)
+        (if-not (= 1 2) :hi :bye))
+      (forms->test "when"
+        (when (= 1 1) :result)
+        (when (= 1 2) :result))
+      (forms->test "when-not"
+        (when-not (= 1 1) :result)
+        (when-not (= 1 2) :result))
+      (forms->test "and"
+        (and)
+        (and 1)
+        (and 1 2)
+        (and 1 2 3)
+        (and nil 1)
+        (and nil nil 1)
+        (and nil nil nil 1)
+        (and false 1)
+        (and false false 1)
+        (and false false false 1)
+        (and nil)
+        (and nil nil)
+        (and nil nil nil)
+        (and false)
+        (and false false)
+        (and false false false))
+      (forms->test "or"
+        (or)
+        (or 1)
+        (or 1 2)
+        (or 1 2 3)
+        (or nil 1)
+        (or nil nil 1)
+        (or nil nil nil 1)
+        (or false 1)
+        (or false false 1)
+        (or false false false 1)
+        (or nil)
+        (or nil nil)
+        (or nil nil nil)
+        (or false)
+        (or false false)
+        (or false false false))
+      (forms->test "cond"
+        (cond)
+        (cond (= 1 1) :result)
+        (cond (= 1 2) :result)
+        (cond (= 1 1) :result
+              :else 0)
+        (cond (= 1 2) :result
+              :else 0)
+        (cond (= 1 1) 1
+              (= 1 2) 2)
+        (cond (= 1 2) 1
+              (= 2 2) 2)
+        (cond (= 1 1) 1
+              (= 1 2) 2
+              :else   3)
+        (cond (= 1 2) 1
+              (= 1 1) 2
+              :else   3)
+        (cond (= 1 2) 1
+              (= 1 2) 2
+              :else   3)))))
