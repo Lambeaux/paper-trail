@@ -1,7 +1,9 @@
 {:lint-as        {lambeaux.paper-trail.wip.interop/defcallable   clojure.core/defrecord
-                  lambeaux.paper-trail.conf-test/forms->test     clojure.test/testing}
- :config-in-call {lambeaux.paper-trail.conf-test/forms->test {:ignore [:redundant-do
-                                                                       :redundant-let
-                                                                       :unused-value
-                                                                       :missing-else-branch
-                                                                       :missing-clause-in-try]}}}
+                  lambeaux.paper-trail.conf-core/forms->test     clojure.test/testing}
+ :config-in-call {lambeaux.paper-trail.conf-core/forms->test     {:ignore [:redundant-do
+                                                                           :redundant-let
+                                                                           :unused-value
+                                                                           :missing-else-branch
+                                                                           :missing-clause-in-try
+                                                                           :invalid-arity
+                                                                           :single-logical-operand]}}}

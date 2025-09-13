@@ -7,159 +7,30 @@
 ;; You must not remove this notice, or any other, from this software.
 (ns lambeaux.paper-trail.conf-test
   "Conformance tests for the interpreter."
-  (:require [clojure.test :as t :refer [deftest testing is]]
-            [clojure.walk :as w]
-            [lambeaux.paper-trail.impl.core :as impl]
-            [lambeaux.paper-trail :as-alias pt])
-  (:import  [clojure.lang ExceptionInfo Atom]
-            [java.io IOException]))
-
-;; runtime ex
-(defn new-illegal-arg-ex
-  ([msg] (IllegalArgumentException. msg))
-  ([msg cause] (IllegalArgumentException. msg cause)))
-
-;; runtime ex
-(defn new-illegal-state-ex
-  ([msg] (IllegalStateException. msg))
-  ([msg cause] (IllegalStateException. msg cause)))
-
-;; NOT runtime ex
-(defn new-io-ex
-  ([msg] (IOException. msg))
-  ([msg cause] (IOException. msg cause)))
-
-(defn throwable?
-  [obj]
-  (instance? Throwable obj))
-
-(defn ex-info?
-  [obj]
-  (instance? ExceptionInfo obj))
-
-(defn ex-comparable*
-  [obj]
-  (when obj
-    {:type    ::pt/ex-comparable
-     :clazz   (class obj)
-     :message (ex-message obj)
-     :data    (ex-data obj)
-     ;; todo: can only recur from tail position
-     ;; not a big deal but possibly revisit later
-     :cause   (ex-comparable* (ex-cause obj))}))
-
-(defn ex-comparable
-  [obj]
-  (w/postwalk
-   (fn [obj]
-     (if-not (instance? Atom obj)
-       obj
-       {:type ::pt/atom-comparable :data (deref obj)}))
-   (if-not (throwable? obj)
-     obj
-     (ex-comparable* obj))))
-
-(comment
-
-  "Keeping this code around just temporarily, can probably remove it
-   if I don't ever need to compare nested data that contain throwables."
-
-  (defn ex=
-    "Extend Clojure equality to include throwables. Not comprehensive, but
-     sufficient enough for our testing purposes."
-    ([_x] true)
-    ([x y]
-     (if-not (throwable? x)
-       (= x y)
-       (if-not (throwable? y)
-         false
-         (= (ex-comparable* x)
-            (ex-comparable* y)))))
-    ([x y & more]
-     (if (ex= x y)
-       (if (next more)
-         (recur y (first more) (next more))
-         (ex= y (first more)))
-       false)))
-
-  (deftype TestResult [result]
-    Object
-    (equals [this other]
-      (ex= (.result this) (.result other)))
-    (hashCode [this]
-      (.hashCode (.result this)))))
-
-(defmacro capture-result
-  [& body]
-  (let [ex-sym (gensym "ex-")]
-    `(try
-       {::pt/uncaught? false
-        ::pt/result    (do ~@body)}
-       (catch Exception ~ex-sym
-         {::pt/uncaught? true
-          ::pt/result    ~ex-sym}))))
-
-(defn wrap*
-  [pt-result]
-  (update pt-result ::pt/result ex-comparable))
-
-(defmacro forms->test
-  [msg & forms]
-  `(testing ~msg
-     (do ~@(map (fn [form]
-                  ;; Possibly move '~form to a let binding
-                  ;; due to expansion/evaluation side effects.
-                  ;; ---
-                  ;; In this case it's probably fine because
-                  ;; we're just using the form "as data". However,
-                  ;; if any atoms or other state are not local to
-                  ;; the form, the test results might be skewed.
-                  `(testing (str '~form)
-                     (is (= (wrap* (capture-result (eval '~form)))
-                            (wrap* (capture-result (impl/evaluate '~form)))))))
-                forms))))
-
-(defn compare-eval*
-  [& forms]
-  (let [handlers [`eval `impl/evaluate]
-        test-cases (for [handler-sym handlers form forms]
-                     {:handler handler-sym :input form})]
-    (mapv (fn [{:keys [handler input] :as tcase}]
-            (let [h (deref (resolve handler))
-                  outcome (capture-result (h input))]
-              (assoc tcase :outcome (update outcome ::pt/result ex-comparable))))
-          test-cases)))
-
-(defn all-evals-match?
-  [compare-reports]
-  (apply = (map :outcome compare-reports)))
-
-(comment
-  "How do use compare-eval to investigate conformance test failures: "
-  (compare-eval* '(try (into [] (map inc ["a" "b" "c"]))))
-  (all-evals-match? *1))
+  (:require [clojure.test :as t :refer [deftest]]
+            [lambeaux.paper-trail.conf-core :as conf]))
 
 (deftest ^:minimal test-core-fns
-  (forms->test "Test basic core functions"
+  (conf/forms->test "Test basic core functions"
     (+ 1 1)
     (list 1 2 3)
     (vector 1 2 3)
     (hash-map :a 1 :b 2)))
 
 (deftest ^:minimal test-nested-core-fns
-  (forms->test "Test basic core functions when nested"
+  (conf/forms->test "Test basic core functions when nested"
     (into (vector) (list 1 2 3))
     (into (vector) (list 1 0.0 "hi" :hi :ex/hi))
     (concat (vector 1 2 3) (list 4 5 6))
     (filter even? (map inc (range 20)))))
 
 (deftest ^:minimal test-literals
-  (forms->test "Test data literals"
+  (conf/forms->test "Test data literals"
     (into [] (list 1 2 3))
     (get {:a 1 :b 2} :a)))
 
 (deftest ^:minimal test-do-return-vals
-  (forms->test "Test (do) return behavior"
+  (conf/forms->test "Test (do) return behavior"
     (do)
     (do nil)
     (do nil nil)
@@ -169,7 +40,7 @@
     (do (+ 1 1) (+ 2 2))))
 
 (deftest ^:special test-if-standalone
-  (forms->test "Test (if) on its own"
+  (conf/forms->test "Test (if) on its own"
     (if true true)
     (if true false)
     (if false false)
@@ -177,7 +48,7 @@
     (if (= 1 2) (+ 2 3) (- 3 2))))
 
 (deftest ^:special test-let-standalone
-  (forms->test "Test (let) on its own"
+  (conf/forms->test "Test (let) on its own"
     (let [x 1] x)
     (let [x 1 y 2] (vector x y))
     (let [x (filter even? (map inc (range 20)))
@@ -191,7 +62,7 @@
               (inc x))
           z (inc x)]
       (vector x y z)))
-  (forms->test "Test (let) implicit (do)"
+  (conf/forms->test "Test (let) implicit (do)"
     (let [a (atom 1)]
       @a)
     (let [a (atom 1)]
@@ -208,7 +79,7 @@
       @a)))
 
 (deftest ^:special test-loop-standalone
-  (forms->test "Test (loop) on its own"
+  (conf/forms->test "Test (loop) on its own"
     (loop [x 1]
       (if (> x 3)
         x
@@ -225,308 +96,8 @@
             (recur (inc y))))
         (recur (inc x))))))
 
-;; todo: revisit once you finish implementing interop
-;; '(try (throw (IllegalArgumentException. "Hi")))
-(deftest ^:special test-try-catch-finally
-  ;; ---------------------------------------------------------------------------
-  (testing "Test (try) standalone"
-    ;; ---------------------------------------------------------------------------
-    (testing "when nothing gets thrown"
-      (forms->test "using basic values"
-        (try (+ 1 1))
-        (try (into [] (map inc [1 2 3]))))
-      (forms->test "using basic values in a nested try"
-        (try (try (+ 1 1)))
-        (try (into [] (try (map inc [1 2 3]))))))
-    ;; ---------------------------------------------------------------------------
-    (testing "when exceptions are manually thrown"
-      (forms->test "using basic values"
-        (try (throw (ex-info "Hi" {})))
-        (try (into [] (map inc (throw (ex-info "Hi" {}))))))
-      (forms->test "using basic values in a nested try"
-        (try (try (throw (ex-info "Hi" {}))))
-        (try (into [] (try (map inc (throw (ex-info "Hi" {}))))))))
-    ;; ---------------------------------------------------------------------------
-    (testing "when exceptions propagate from other fns"
-      (forms->test "using basic values"
-        (try (into [] (map inc ["a" "b" "c"]))))
-      (forms->test "using basic values in a nested try"
-        (try (into [] (try (map inc ["a" "b" "c"])))))))
-  ;; ---------------------------------------------------------------------------
-  (testing "Test (try) with (catch)"
-    ;; ---------------------------------------------------------------------------
-    (testing "when nothing gets thrown"
-      (forms->test "using basic values"
-        (try (+ 1 1)
-             (catch Exception _e :error))
-        (try (into [] (map inc [1 2 3]))
-             (catch Exception _e :error)))
-      (forms->test "using basic values in a nested try"
-        (try (try (+ 1 1)
-                  (catch Exception _ey :inner-error))
-             (catch Exception _ex :outer-error))
-        (try (into [] (try (map inc [1 2 3])
-                           (catch Exception _ey :inner-error)))
-             (catch Exception _ex :outer-error))))
-    ;; ---------------------------------------------------------------------------
-    (testing "when thrown exceptions are not caught"
-      (forms->test "using basic values"
-        (try (throw (ex-info "Hi" {}))
-             (catch IllegalArgumentException _e :error))
-        (try (into [] (map inc (throw (ex-info "Hi" {}))))
-             (catch IllegalArgumentException _e :error)))
-      (forms->test "using basic values in a nested try"
-        (try (try (throw (ex-info "Hi" {}))
-                  (catch IllegalArgumentException _ey :inner-error))
-             (catch IllegalArgumentException _ex :outer-error))
-        (try (into [] (try (map inc (throw (ex-info "Hi" {})))
-                           (catch IllegalArgumentException _ey :inner-error)))
-             (catch IllegalArgumentException _ex :outer-error))))
-    ;; ---------------------------------------------------------------------------
-    (testing "when thrown exceptions trigger a catch"
-      (forms->test "using basic values"
-        (try (throw (ex-info "Hi" {}))
-             (catch Exception _e :error))
-        (try (throw (ex-info "Hi" {}))
-             (catch IllegalArgumentException _e :first-catch)
-             (catch Exception _e :second-catch))
-        (try (throw (ex-info "Hi" {}))
-             (catch Exception _e :first-catch)
-             (catch RuntimeException _e :second-catch))
-        (try (into [] (map inc (throw (ex-info "Hi" {}))))
-             (catch Exception _e :error))
-        (try (into [] (map inc (throw (ex-info "Hi" {}))))
-             (catch IllegalArgumentException _e :first-catch)
-             (catch Exception _e :second-catch))
-        (try (into [] (map inc (throw (ex-info "Hi" {}))))
-             (catch Exception _e :first-catch)
-             (catch RuntimeException _e :second-catch)))
-      (forms->test "using basic values in a nested try"
-        (try (try (throw (ex-info "Hi" {}))
-                  (catch Exception _ey :inner-error))
-             (catch Exception _ex :outer-error))
-        (try (try (throw (ex-info "Hi" {}))
-                  (catch IllegalArgumentException _ey :inner-error))
-             (catch Exception _ex :outer-error))
-        (try (try (throw (ex-info "Hi" {}))
-                  (catch Exception _ey :inner-error))
-             (catch RuntimeException _ex :outer-error))
-        (try (into [] (try (map inc (throw (ex-info "Hi" {})))
-                           (catch Exception _ey :inner-error)))
-             (catch Exception _ex :outer-error))
-        (try (into [] (try (map inc (throw (ex-info "Hi" {})))
-                           (catch IllegalArgumentException _ey :inner-error)))
-             (catch Exception _ex :outer-error))
-        (try (into [] (try (map inc (throw (ex-info "Hi" {})))
-                           (catch Exception _ey :inner-error)))
-             (catch RuntimeException _ex :outer-error))))
-    ;; ---------------------------------------------------------------------------
-    (testing "when propagated exceptions are not caught"
-      (forms->test "using basic values"
-        (try (into [] (map inc ["a" "b" "c"]))
-             (catch IllegalArgumentException _e :error)))
-      (forms->test "using basic values in a nested try"
-        (try (into [] (try (map inc ["a" "b" "c"])
-                           (catch IllegalArgumentException _ey :inner-error)))
-             (catch IllegalArgumentException _ex :outer-error))))
-    ;; ---------------------------------------------------------------------------
-    (testing "when propagated exceptions trigger a catch"
-      (forms->test "using basic values"
-        (try (into [] (map inc ["a" "b" "c"]))
-             (catch Exception _e :error))
-        (try (into [] (map inc ["a" "b" "c"]))
-             (catch IllegalStateException _e :first-catch)
-             (catch RuntimeException _e :second-catch)
-             (catch Exception _e :third-catch))
-        (try (into [] (map inc ["a" "b" "c"]))
-             (catch IllegalStateException _e :first-catch)
-             (catch IllegalArgumentException _e :second-catch)
-             (catch RuntimeException _e :third-catch)
-             (catch Exception _e :fourth-catch))
-        (try (into [] (map inc ["a" "b" "c"]))
-             (catch ClassCastException _e :first-catch)
-             (catch RuntimeException _e :second-catch)
-             (catch Exception _e :third-catch))
-        (try (into [] (map inc ["a" "b" "c"]))
-             (catch IllegalStateException _e :first-catch)
-             (catch ClassCastException _e :second-catch)
-             (catch RuntimeException _e :third-catch)
-             (catch Exception _e :fourth-catch)))
-      (forms->test "using basic values in a nested try"
-        (try (into [] (try (map inc ["a" "b" "c"])
-                           (catch IllegalArgumentException _ey :inner-error)))
-             (catch Exception _ex :outer-error))
-        (try (into [] (try (map inc ["a" "b" "c"])
-                           (catch Exception _ey :inner-error)))
-             (catch IllegalArgumentException _ex :outer-error))
-        (try (into [] (try (map inc ["a" "b" "c"])
-                           (catch Exception _ey :inner-error)))
-             (catch RuntimeException _ex :outer-error)))))
-  ;; ---------------------------------------------------------------------------
-  (testing "Test (try) with (finally)"
-    (testing "when nothing gets thrown"
-      (forms->test "using basic values"
-        (deref (let [x (atom 1)]
-                 (try (swap! x inc)
-                      (swap! x inc)
-                      x
-                      (finally (swap! x inc)))))
-        (deref (let [x (atom 1)]
-                 (try (swap! x inc)
-                      (swap! x inc)
-                      x
-                      (finally (swap! x inc)
-                               (swap! x inc))))))
-      (forms->test "using basic values in a nested try"
-        (deref (let [x (atom 1)]
-                 (try (swap! x inc)
-                      (try (swap! x inc)
-                           (swap! x inc)
-                           x
-                           (finally (swap! x inc)))
-                      (finally (swap! x inc)))))
-        (deref (let [x (atom 1)]
-                 (try (swap! x inc)
-                      (try (swap! x inc)
-                           (swap! x inc)
-                           x
-                           (finally (swap! x inc)
-                                    (swap! x inc)))
-                      (finally (swap! x inc)
-                               (swap! x inc))))))
-      (forms->test "using basic values in a nested finally"
-        (deref (let [x (atom 1)]
-                 (try (swap! x inc)
-                      (finally
-                        (try (swap! x inc)
-                             (swap! x inc)
-                             x
-                             (finally (swap! x inc)))))))))
-    (testing "when an exception is thrown"
-      (forms->test "using basic values"
-        (deref (let [x (atom 1)]
-                 (try (swap! x inc)
-                      (try (swap! x inc)
-                           (throw (ex-info "Hi" (hash-map :the-atom x)))
-                           x
-                           (finally (swap! x inc)))
-                      (finally (swap! x inc))))))
-      (forms->test "using basic values in a nested try"
-        (deref (let [x (atom 1)]
-                 (try (swap! x inc)
-                      (try (swap! x inc)
-                           (throw (ex-info "Hi" (hash-map :the-atom x)))
-                           x
-                           (finally (swap! x inc)
-                                    (swap! x inc)))
-                      (finally (swap! x inc)
-                               (swap! x inc))))))
-      (forms->test "using basic values in a nested finally"
-        (deref (let [x (atom 1)]
-                 (try (swap! x inc)
-                      (finally
-                        (try (throw (ex-info "Hi" (hash-map :the-atom x)))
-                             (swap! x inc)
-                             x
-                             (finally (swap! x inc))))))))))
-  ;; ---------------------------------------------------------------------------
-  (testing "Test (try) with (catch) and (finally)"
-    (forms->test "when nothing is thrown"
-      (let [int-atom (atom 1)
-            vec-val (vector 1 2 3 4 5)
-            result (try
-                     (into [] (filter odd? (map inc vec-val)))
-                     (catch Exception _e :error)
-                     (finally (swap! int-atom inc)))]
-        (hash-map :int-atom (deref int-atom) :result result)))
-    (forms->test "when an exception is manually thrown"
-      (let [int-atom (atom 1)
-            result (try
-                     (into [] (filter odd? (throw (ex-info "Hi" {}))))
-                     (catch Exception _e :error)
-                     (finally (swap! int-atom inc)))]
-        (hash-map :int-atom (deref int-atom) :result result)))
-    (forms->test "when an exception propogates up from the call stack"
-      (let [int-atom (atom 1)
-            vec-val (map str (vector 1 2 3 4 5))
-            result (try
-                     (into [] (filter odd? (map inc vec-val)))
-                     (catch Exception _e :error)
-                     (finally (swap! int-atom inc)))]
-        (hash-map :int-atom (deref int-atom) :result result)))
-    (forms->test "when an exception is caught by the inner catch"
-      (let [int-atom (atom 1)
-            vec-val (map str (vector 1 2 3 4 5))
-            result (try
-                     ;; todo: need to test when ex's happen on earlier arg
-                     ;; the (into) destination '[]' instead of the source seq
-                     (into [] (try
-                                (filter odd? (mapv inc vec-val))
-                                (catch ClassCastException _cce [:inner-error])
-                                (finally (swap! int-atom inc))))
-                     (catch Exception _e :error)
-                     (finally (swap! int-atom inc)))]
-        (hash-map :int-atom (deref int-atom) :result result)))
-    (forms->test "when an exception is caught by the outer catch"
-      (let [int-atom (atom 1)
-            vec-val (map str (vector 1 2 3 4 5))
-            result (try
-                     (into [] (try
-                                (filter odd? (map inc vec-val))
-                                (catch IllegalArgumentException _iae [:inner-error])
-                                (finally (swap! int-atom inc))))
-                     (catch Exception _e :error)
-                     (finally (swap! int-atom inc)))]
-        (hash-map :int-atom (deref int-atom) :result result)))
-    (forms->test "when an inner exception is not caught at all"
-      (let [int-atom (atom 1)
-            vec-val (map str (vector 1 2 3 4 5))
-            result (try
-                     (into [] (try
-                                (filter odd? (mapv inc vec-val))
-                                (catch IllegalArgumentException _iae [:inner-error])
-                                (finally (swap! int-atom inc))))
-                     (catch IllegalStateException _e :error)
-                     (finally (swap! int-atom inc)))]
-        (hash-map :int-atom (deref int-atom) :result result)))
-    (forms->test "when an outer exception is not caught at all"
-      (let [int-atom (atom 1)
-            vec-val (map str (vector 1 2 3 4 5))
-            result (try
-                     (into [] (try
-                                (filter odd? (map inc vec-val))
-                                (catch IllegalArgumentException _iae [:inner-error])
-                                (finally (swap! int-atom inc))))
-                     (catch IllegalStateException _e :error)
-                     (finally (swap! int-atom inc)))]
-        (hash-map :int-atom (deref int-atom) :result result)))
-    (forms->test "when an exception is thrown in a finally after catch resolution"
-      (let [int-atom (atom 1)
-            vec-val (map str (vector 1 2 3 4 5))
-            result (try
-                     (into [] (try
-                                (filter odd? (mapv inc vec-val))
-                                (catch ClassCastException _iae [:inner-error])
-                                (finally (swap! int-atom inc)
-                                         (throw (ex-info "Hi" {})))))
-                     (catch Exception _e :error)
-                     (finally (swap! int-atom inc)))]
-        (hash-map :int-atom (deref int-atom) :result result)))
-    (forms->test "when an exception is thrown in a finally without catch resolution"
-      (let [int-atom (atom 1)
-            vec-val (map str (vector 1 2 3 4 5))
-            result (try
-                     (into [] (try
-                                (filter odd? (mapv inc vec-val))
-                                (catch IllegalArgumentException _iae [:inner-error])
-                                (finally (swap! int-atom inc)
-                                         (throw (ex-info "Hi" {})))))
-                     (catch Exception _e :error)
-                     (finally (swap! int-atom inc)))]
-        (hash-map :int-atom (deref int-atom) :result result)))))
-
 (deftest ^:core test-do-side-effects
-  (forms->test "Test (do) side effect behavior"
+  (conf/forms->test "Test (do) side effect behavior"
     (let [a (atom 1)]
       (do @a))
     (let [a (atom 1)]
@@ -543,7 +114,7 @@
           @a))))
 
 (deftest ^:core test-eval-left-to-right
-  (forms->test "Test forms evaluate left-to-right"
+  (conf/forms->test "Test forms evaluate left-to-right"
     (let [state (atom (list 3 5))
           peek-pop! (fn []
                       (let [the-val (peek (deref state))]
@@ -552,244 +123,28 @@
       (- (* 2 (peek-pop!)) (peek-pop!)))))
 
 (deftest ^:core test-anonymous-functions
-  #_(forms->test "Test invoke (fn) directly"
+  #_(conf/forms->test "Test invoke (fn) directly"
       ((fn [] 100))
       ((fn [x] (+ 100 x)) 1)
       ((fn [x y] (+ 100 x y)) 1 2)
       ((fn [x y z] (+ 100 x y z)) 1 2 3))
-  (forms->test "Test (fn) inside lazy sequences"
+  (conf/forms->test "Test (fn) inside lazy sequences"
     (map (fn [x] (inc x))
          (filter (fn [x] (odd? x))
                  (into (vector) (range 1 6))))
     (map (fn [x] (range (* -1 x) x))
          (into (vector) (range 1 6))))
-  (forms->test "Test (fn) inside realized sequences"
+  (conf/forms->test "Test (fn) inside realized sequences"
     (mapv (fn [x] (inc x))
           (filterv (fn [x] (odd? x))
                    (into (vector) (range 1 6))))
     (mapv (fn [x] (into [] (range (* -1 x) x)))
           (into (vector) (range 1 6))))
-  (forms->test "Test (fn) inside (fn) inside lazy sequences"
+  (conf/forms->test "Test (fn) inside (fn) inside lazy sequences"
     (map (fn [x] (map (fn [y] (inc y)) (get x :seq)))
          (mapv (fn [i] (hash-map :seq (range i)))
                (range 1 6))))
-  (forms->test "Test (fn) inside (fn) inside realized sequences"
+  (conf/forms->test "Test (fn) inside (fn) inside realized sequences"
     (mapv (fn [x] (mapv (fn [y] (inc y)) (get x :seq)))
           (mapv (fn [i] (hash-map :seq (into (vector) (range i))))
                 (range 1 6)))))
-
-(comment
-  "List macros in clojure.core alphabetically"
-  (->> (the-ns 'clojure.core)
-       (ns-publics)
-       (vals)
-       (map meta)
-       (filter :macro)
-       (map :name)
-       (sort)
-       (take 30)))
-
-(comment
-  "Macros that still need tests"
-  ..
-  amap
-  areduce
-  assert
-  bound-fn
-  delay
-  "Macros we likely won't test (for now)"
-  declare
-  definline
-  definterface
-  defmacro
-  defmethod
-  defmulti
-  defn
-  defn-
-  defonce
-  defprotocol
-  defrecord
-  defstruct
-  deftype)
-
-;; Used for testing (binding ...) in below tests
-(def ^:dynamic *test-counter* 0)
-
-;; Used for testing (with-redefs ...) in below tests
-(def test-fn (fn [idx] idx))
-
-#_{:clj-kondo/ignore [:invalid-arity :single-logical-operand]}
-(deftest ^:core test-common-macros
-  (testing "Test common macros from clojure.core"
-    ;; ---------------------------------------------------------------------------
-    (testing "that wrap a body: "
-      (forms->test "binding"
-        ;; TODO: add a way to specify if we expect eval to throw or not 
-        ;; (protect against false positives where the result matched but we didn't cover the intended code path)
-        (binding)
-        (binding [])
-        ;; TODO: match paper trail's exception to the clojure one when a symbol cannot be found
-        ;;   Clojure's flavor: Unable to resolve symbol: *test-counter* in this context (RuntimeException)
-        ;;   PT's current flavor: class clojure.lang.Symbol cannot be cast to class java.lang.Number (ClassCastException)
-        #_(binding [] (inc *test-counter*))
-        ;; TODO: fix lookup of fully qualified symbols (PT gets a NullPointerException)
-        ;;   Call Stack: [#stack.val[lambeaux.paper-trail.conf-test/*test-counter*]]
-        ;;   Next Command: calling (var ...) so need to add support for that
-        #_(binding []
-            (inc lambeaux.paper-trail.conf-test/*test-counter*))
-        #_(binding [lambeaux.paper-trail.conf-test/*test-counter* 1]
-            (inc lambeaux.paper-trail.conf-test/*test-counter*))
-        #_(binding [lambeaux.paper-trail.conf-test/*test-counter* 2]
-            (inc lambeaux.paper-trail.conf-test/*test-counter*))
-        #_(binding [lambeaux.paper-trail.conf-test/*test-counter* 1]
-            (binding [lambeaux.paper-trail.conf-test/*test-counter* 2]
-              (inc lambeaux.paper-trail.conf-test/*test-counter*)))
-        #_(binding [lambeaux.paper-trail.conf-test/*test-counter* 1]
-            (binding [lambeaux.paper-trail.conf-test/*test-counter* 2]
-              (binding [lambeaux.paper-trail.conf-test/*test-counter* 3]
-                (inc lambeaux.paper-trail.conf-test/*test-counter*))))))
-    ;; ---------------------------------------------------------------------------
-    (testing "that involve threading forms: "
-      (forms->test "->"
-        (->)
-        (-> (hash-map))
-        (-> (hash-map) (assoc :k "v"))
-        (-> (hash-map) (assoc :k "v1") (assoc :k "v2"))
-        (-> (hash-map) (assoc :k "v1") (assoc :k "v2") (assoc :k "v3")))
-      (forms->test "cond->"
-        (cond->)
-        (cond-> (hash-map))
-        ;; TODO: add support to ex-comparable for munging out the specifics of CompilerException
-        ;; for example: 'output.calva-repl:171:1' in the :message and :line/:column in the :data
-        ;; (cond-> (hash-map) true)
-        (cond-> (hash-map) true (assoc :k "v"))
-        (cond-> (hash-map) true (assoc :k "v1") true (assoc :k "v2"))
-        (cond-> (hash-map) true (assoc :k "v1") true (assoc :k "v2") true (assoc :k "v3"))
-        (cond-> (hash-map) true (assoc :k "v1") true (assoc :k "v2") false (assoc :k "v3"))
-        (cond-> (hash-map) true (assoc :k "v1") false (assoc :k "v2") false (assoc :k "v3"))
-        (cond-> (hash-map) false (assoc :k "v1") false (assoc :k "v2") false (assoc :k "v3")))
-      (forms->test "->>"
-        (->>)
-        (->> (vector 1 2 3))
-        (->> (vector 1 2 3) (mapv inc))
-        (->> (vector 1 2 3) (mapv inc) (mapv inc))
-        (->> (vector 1 2 3) (mapv inc) (mapv inc) (mapv inc)))
-      (forms->test "cond->>"
-        (cond->>)
-        (cond->> (vector 1 2 3))
-        ;; TODO: add support to ex-comparable for munging out the specifics of CompilerException
-        ;; for example: 'output.calva-repl:171:1' in the :message and :line/:column in the :data
-        ;; (cond->> (vector 1 2 3) true)
-        (cond->> (vector 1 2 3) true (mapv inc))
-        (cond->> (vector 1 2 3) true (mapv inc) true (mapv inc))
-        (cond->> (vector 1 2 3) true (mapv inc) true (mapv inc) true (mapv inc))
-        (cond->> (vector 1 2 3) true (mapv inc) true (mapv inc) false (mapv inc))
-        (cond->> (vector 1 2 3) true (mapv inc) false (mapv inc) false (mapv inc))
-        (cond->> (vector 1 2 3) false (mapv inc) false (mapv inc) false (mapv inc)))
-      (forms->test "as->"
-        (as->)
-        (as-> (+ 1 1))
-        (as-> (+ 1 1) _$)
-        (as-> (hash-map) $ (assoc $ :k "v"))
-        (as-> (hash-map) $ (assoc $ :k "v1") (assoc $ :k "v2"))
-        (as-> (vector 1 2 3) $ (mapv inc $))
-        (as-> (vector 1 2 3) $ (mapv inc $) (mapv inc $))
-        (as-> (hash-map) $
-          (assoc $ :k (vector 10))
-          (update $ :k conj 11)
-          (:k $)
-          (mapv inc $))))
-    ;; ---------------------------------------------------------------------------
-    (testing "that fulfill misc goals: "
-      (forms->test "comment"
-        (comment)
-        (comment 1)
-        (comment 1 2)
-        (comment 1 2 3)))
-    ;; ---------------------------------------------------------------------------
-    (testing "that involve control flow: "
-      (forms->test "if-not"
-        (if-not (= 1 1) :hi)
-        (if-not (= 1 2) :hi)
-        (if-not (= 1 1) :hi :bye)
-        (if-not (= 1 2) :hi :bye))
-      (forms->test "when"
-        (when (= 1 1) :result)
-        (when (= 1 2) :result))
-      (forms->test "when-not"
-        (when-not (= 1 1) :result)
-        (when-not (= 1 2) :result))
-      (forms->test "and"
-        (and)
-        (and 1)
-        (and 1 2)
-        (and 1 2 3)
-        (and nil 1)
-        (and nil nil 1)
-        (and nil nil nil 1)
-        (and false 1)
-        (and false false 1)
-        (and false false false 1)
-        (and nil)
-        (and nil nil)
-        (and nil nil nil)
-        (and false)
-        (and false false)
-        (and false false false))
-      (forms->test "or"
-        (or)
-        (or 1)
-        (or 1 2)
-        (or 1 2 3)
-        (or nil 1)
-        (or nil nil 1)
-        (or nil nil nil 1)
-        (or false 1)
-        (or false false 1)
-        (or false false false 1)
-        (or nil)
-        (or nil nil)
-        (or nil nil nil)
-        (or false)
-        (or false false)
-        (or false false false))
-      (forms->test "case"
-        (case)
-        ;; TODO: cannot find fn 'case*' during evaluation
-        #_(case 2)
-        #_(case 2 0)
-        #_(case 2 1 -1)
-        #_(case 2 1 -1 0)
-        #_(case 2 1 -1 2 -2)
-        #_(case 2 1 -1 2 -2 0))
-      (forms->test "cond"
-        (cond)
-        (cond (= 1 1) :result)
-        (cond (= 1 2) :result)
-        (cond (= 1 1) :result
-              :else 0)
-        (cond (= 1 2) :result
-              :else 0)
-        (cond (= 1 1) 1
-              (= 1 2) 2)
-        (cond (= 1 2) 1
-              (= 2 2) 2)
-        (cond (= 1 1) 1
-              (= 1 2) 2
-              :else   3)
-        (cond (= 1 2) 1
-              (= 1 1) 2
-              :else   3)
-        (cond (= 1 2) 1
-              (= 1 2) 2
-              :else   3))
-      (forms->test "condp"
-        (condp)
-        ;; TODO: trying to invoke-fn a java.lang.IllegalArgumentException. (interop not done)
-        #_(condp = 2)
-        (condp = 2 0)
-        ;; TODO: incorrect result, getting -1 instead of 0 or error
-        #_(condp = 2 1 -1)
-        #_(condp = 2 1 -1 0)
-        #_(condp = 2 1 -1 2 -2)
-        #_(condp = 2 1 -1 2 -2 0)))))

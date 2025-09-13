@@ -1,4 +1,9 @@
-{:extra-indents {lambeaux.paper-trail.repl/spit-commands              [[:block 1]]
+{:paths ["src" "test"]
+ :indent-line-comments? true
+ :extra-indents {lambeaux.paper-trail.repl/spit-commands              [[:block 1]]
                  lambeaux.paper-trail.impl.generator/action->command  [[:block 1]]
                  lambeaux.paper-trail.impl.generator/action->commands [[:block 1]]
-                 lambeaux.paper-trail.conf-test/forms->test           [[:block 1]]}}
+                 lambeaux.paper-trail.conf-core/forms->test           [[:block 1]]}
+ ;; TODO: This alias map should NOT be necessary but cljfmt can't figure it out
+ ;; I don't want to use an alias, I want to :refer
+ :alias-map {conf lambeaux.paper-trail.conf-core}}

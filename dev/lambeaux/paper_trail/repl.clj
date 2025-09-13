@@ -20,7 +20,7 @@
    '[lambeaux.paper-trail.impl.executor.call-stack :as stack]
    '[lambeaux.paper-trail.impl.executor.data-model :as model]
    '[lambeaux.paper-trail.impl.executor.middleware :as middleware]
-   '[lambeaux.paper-trail.conf-test :as ptconf]])
+   '[lambeaux.paper-trail.conf-core :as conf]])
 
 (defn require-pt
   []
