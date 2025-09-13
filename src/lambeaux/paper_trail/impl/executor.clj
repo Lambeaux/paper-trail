@@ -20,11 +20,8 @@
 ;; ------------------------------------------------------------------------------------------------
 
 (defn stack-find
-  [{:keys [fn-idx call-stack-primary call-stack-finally] :as ctx}]
-  (let [[stack-name _stack-to-use] (if (zero? (get-in ctx [:fn-stack fn-idx :finally-depth]))
-                                     [:call-stack-primary call-stack-primary]
-                                     [:call-stack-finally call-stack-finally])]
-    (get-in ctx [:fn-stack fn-idx stack-name])))
+  [{:keys [fn-idx] :as ctx}]
+  (get-in ctx [:fn-stack fn-idx :call-stack]))
 
 (defn process-stack-push-frame
   [{:keys [call-stack] :as ctx}]

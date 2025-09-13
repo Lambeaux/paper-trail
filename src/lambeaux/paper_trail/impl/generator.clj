@@ -258,6 +258,8 @@
               (mapcat form->commands body))
             (action->commands :unbind-name :bind-id ex-sym :in-macro? in-macro?))))
 
+;; Note: (finally) uses an implicit (do), but does not convey-result? of the (do) since
+;; (finally) is only for executing side effects and not impacting return value
 (defn finally->cmds
   [{:keys [form->commands] :as ctx} body]
   (with-form-wrappers [ctx 'finally :special]

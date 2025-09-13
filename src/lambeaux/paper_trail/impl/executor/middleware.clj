@@ -24,25 +24,6 @@
       (model/process-no-op ctx)
       (handler ctx))))
 
-(defn wrap-call-stack
-  [handler]
-  (fn [{:keys [fn-idx call-stack-primary call-stack-finally finally-depth] :as ctx}]
-    (let [[stack-name stack-to-use] (if (zero? finally-depth)
-                                      [:call-stack-primary call-stack-primary]
-                                      [:call-stack-finally call-stack-finally])
-          ctx* (handler (-> ctx
-                            (assoc :call-stack stack-to-use)
-                            (assoc-in [:fn-stack fn-idx :call-stack] stack-to-use)))
-          ;; todo: fix stack writes for better parity
-          ;; modified-stack (:call-stack ctx*)
-          ;; -------------------------
-          ;; todo: it's possible, if the fn-stack was pushed/popped, that modified-stack is nil
-          modified-stack (get-in ctx* [:fn-stack fn-idx :call-stack])
-          ctx** (dissoc ctx* :call-stack)]
-      (if-not modified-stack
-        ctx**
-        (assoc-in ctx** [:fn-stack fn-idx stack-name] modified-stack)))))
-
 (defn wrap-check-not-infinite
   [handler]
   (fn [ctx]
@@ -85,7 +66,6 @@
   ([wrap-infinite? handler]
    (cond-> handler
      true           wrap-throwing
-     true           wrap-call-stack
      wrap-infinite? wrap-check-not-infinite
      true           wrap-convenience-mappings
      true           wrap-uncaught-ex)))
@@ -93,8 +73,7 @@
 ;; (wrap-command-middleware false f)
 (defn run-with
   [f ctx & args]
-  (apply (-> (wrap-call-stack f)
-             (wrap-convenience-mappings))
+  (apply (wrap-convenience-mappings f)
          (select-keys ctx model/allowed-exec-keys)
          args))
 

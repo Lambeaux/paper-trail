@@ -21,9 +21,7 @@
   [commands]
   {:commands commands
    :command-history (list)
-   ;; :call-stack (list) ;; (added with middleware)
-   :call-stack-primary (list)
-   :call-stack-finally (list)
+   :call-stack (list)
    :form-depth -1
    :finally-depth 0
    :source-scope {}
