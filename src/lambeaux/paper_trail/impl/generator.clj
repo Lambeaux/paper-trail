@@ -46,8 +46,11 @@
           (action->commands :stack-pop-frame)))
 
 (defn with-implicit-do
-  [command-seq]
-  (with-stack-frame (concat command-seq (action->commands :invoke-do))))
+  ([command-seq]
+   (with-implicit-do true command-seq))
+  ([convey-result? command-seq]
+   (with-stack-frame (concat command-seq
+                             (action->commands :invoke-do :convey-result? convey-result?)))))
 
 (defn with-form-wrappers
   "Wraps a seq of commands with the :begin-form and :end-form commands."
@@ -75,8 +78,8 @@
 (defn handle-do
   [{:keys [form->commands] :as ctx} form]
   (with-form-wrappers [ctx 'do :special]
-    #_(with-implicit-do (mapcat form->commands (rest form)))
-    (mapcat form->commands (rest form))))
+    (with-implicit-do
+      (mapcat form->commands (rest form)))))
 
 (defn handle-macro
   [{:keys [->commands] :as ctx} form]
@@ -119,8 +122,8 @@
                                   (action->commands :bind-name
                                     :bind-id bname :bind-from :call-stack :in-macro? in-macro?))))
                       bindings)
-              #_(with-implicit-do (mapcat form->commands body))
-              (mapcat form->commands body)
+              (with-implicit-do
+                (mapcat form->commands body))
               (mapcat (fn [[bname _]]
                         (action->commands :unbind-name
                           :bind-id bname :in-macro? in-macro?))
@@ -129,7 +132,7 @@
 (defn handle-loop
   [{:keys [->commands argdef-stack recur-idx in-macro?] :as ctx} form]
   ;; TODO: Need to double check this "stack local" form of incrementing recur-idx,
-  ;; it means some idxs will be reused down the road
+  ;; it means some idxs will be reused down the road (but it appears to be working just fine)
   (let [recur-idx (inc recur-idx)
         bindings (partition 2 (second form))
         body (drop 2 form)
@@ -147,8 +150,8 @@
                                     :in-macro? in-macro?))))
                       bindings)
               (action->commands :recur-target :idx recur-idx :in-macro? in-macro?)
-              #_(with-implicit-do (mapcat #(form->commands ctx* %) body))
-              (mapcat #(->commands ctx* %) body)
+              (with-implicit-do
+                (mapcat (partial ->commands ctx*) body))
               (mapcat (fn [[bname _]]
                         (action->commands :unbind-name :bind-id bname :in-macro? in-macro?))
                       bindings)))))
@@ -222,8 +225,7 @@
                                          (map #(str "arg-" %) (range (count argdefs)))
                                          argdefs)
                                     (action->commands :recur-target :idx recur-idx :in-macro? in-macro?)
-                                    #_(with-implicit-do (form->commands attrs* body))
-                                    (->commands ctx* body))]
+                                    (with-implicit-do (->commands ctx* body)))]
               (update accum k #(assoc % :commands commands*))))
           metainf
           (keys metainf)))
@@ -252,8 +254,8 @@
   (with-form-wrappers [ctx 'catch :special]
     (concat (action->commands :bind-name
               :bind-id ex-sym :bind-from :state :state-id :caught-ex :in-macro? in-macro?)
-            #_(with-implicit-do (mapcat form->commands body))
-            (mapcat form->commands body)
+            (with-implicit-do
+              (mapcat form->commands body))
             (action->commands :unbind-name :bind-id ex-sym :in-macro? in-macro?))))
 
 (defn finally->cmds
@@ -261,8 +263,8 @@
   (with-form-wrappers [ctx 'finally :special]
     (concat (action->commands :begin-finally)
             (action->commands :set-context :props {:is-finally? true})
-            #_(with-implicit-do (mapcat form->commands body))
-            (mapcat form->commands body)
+            (with-implicit-do false
+              (mapcat form->commands body))
             (action->commands :set-context :props {:is-finally? false})
             (action->commands :end-finally))))
 
@@ -291,7 +293,6 @@
                            (finally->cmds ctx (rest finally*)))
                 :in-macro? in-macro?)
               (with-implicit-do (mapcat form->commands body))
-              ;; (mapcat form->commands body)
               (action->commands :cleanup-try :id id :in-macro? in-macro?)))))
 
 ;; ------------------------------------------------------------------------------------------------

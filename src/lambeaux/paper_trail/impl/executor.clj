@@ -199,8 +199,10 @@
       (model/default-update [:call-stack call-stack])))
 
 (defn process-invoke-do
-  [{:keys [call-stack] :as ctx}]
-  (model/default-update ctx [:call-stack (stack/push-resolved-val call-stack)]))
+  [{:keys [call-stack] [{:keys [convey-result?]}] :commands :as ctx}]
+  (model/default-update ctx [:call-stack (if convey-result?
+                                           (stack/push-resolved-val call-stack)
+                                           (stack/frame-pop call-stack))]))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Processors: Terminal Value Handlers
