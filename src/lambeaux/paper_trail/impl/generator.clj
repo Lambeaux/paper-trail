@@ -65,29 +65,28 @@
 
 (defn handle-invoke
   [{:keys [form->commands] :as ctx} form]
-  (let [args (rest form)
-        cmds (mapcat (partial form->commands ctx) args)]
+  (let [args (rest form)]
     (with-form-wrappers [ctx (first form) :fn]
       (with-stack-frame
-        (concat cmds (action->commands :invoke-fn
-                       :op (first form) :arg-count (count args)))))))
+        (concat (mapcat form->commands args)
+                (action->commands :invoke-fn
+                  :op (first form) :arg-count (count args)))))))
 
 (defn handle-do
   [{:keys [form->commands] :as ctx} form]
-  (let [form->commands (partial form->commands ctx)]
-    (with-form-wrappers [ctx 'do :special]
-      #_(with-implicit-do (mapcat form->commands (rest form)))
-      (mapcat form->commands (rest form)))))
+  (with-form-wrappers [ctx 'do :special]
+    #_(with-implicit-do (mapcat form->commands (rest form)))
+    (mapcat form->commands (rest form))))
 
 (defn handle-macro
-  [{:keys [form->commands] :as ctx} form]
+  [{:keys [->commands] :as ctx} form]
   (let [form* (cons (first form)
                     (map #(if (instance? IObj %)
                             (vary-meta % assoc ::pt/macro-arg true)
                             %)
                          (rest form)))]
     (with-form-wrappers [ctx (first form) :macro]
-      (form->commands (assoc ctx :in-macro? true) (macroexpand form*)))))
+      (->commands (assoc ctx :in-macro? true) (macroexpand form*)))))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Generators: Special Forms
@@ -97,7 +96,6 @@
   [{:keys [form->commands] :as ctx} form]
   ;; TODO Investigate: if the repl remains alive for weeks, will we run out of gensyms?
   (let [id (gensym "if-")
-        form->commands (partial form->commands ctx)
         cond-pos (form->commands (first (drop 2 form)))
         cond-neg (form->commands (second (drop 2 form)))]
     (with-form-wrappers [ctx 'if :special]
@@ -111,8 +109,7 @@
 
 (defn handle-let
   [{:keys [form->commands in-macro?] :as ctx} form]
-  (let [form->commands (partial form->commands ctx)
-        bindings (partition 2 (second form))
+  (let [bindings (partition 2 (second form))
         body (drop 2 form)]
     ;; :op (first form) ??
     (with-form-wrappers [ctx 'let :special]
@@ -130,7 +127,9 @@
                       bindings)))))
 
 (defn handle-loop
-  [{:keys [form->commands argdef-stack recur-idx in-macro?] :as ctx} form]
+  [{:keys [->commands argdef-stack recur-idx in-macro?] :as ctx} form]
+  ;; TODO: Need to double check this "stack local" form of incrementing recur-idx,
+  ;; it means some idxs will be reused down the road
   (let [recur-idx (inc recur-idx)
         bindings (partition 2 (second form))
         body (drop 2 form)
@@ -141,7 +140,7 @@
     (with-form-wrappers [ctx 'loop :special]
       (concat (mapcat (fn [[bname bform]]
                         (with-stack-frame
-                          (concat (form->commands ctx* bform)
+                          (concat (->commands ctx* bform)
                                   (action->commands :bind-name
                                     :bind-id bname
                                     :bind-from :call-stack
@@ -149,15 +148,14 @@
                       bindings)
               (action->commands :recur-target :idx recur-idx :in-macro? in-macro?)
               #_(with-implicit-do (mapcat #(form->commands ctx* %) body))
-              (mapcat #(form->commands ctx* %) body)
+              (mapcat #(->commands ctx* %) body)
               (mapcat (fn [[bname _]]
                         (action->commands :unbind-name :bind-id bname :in-macro? in-macro?))
                       bindings)))))
 
 (defn handle-recur
   [{:keys [form->commands argdef-stack recur-idx in-macro?] :as ctx} form]
-  (let [form->commands (partial form->commands ctx)
-        forms (rest form)
+  (let [forms (rest form)
         ;; TODO Investigate: if the repl remains alive for weeks, will we run out of gensyms?
         state-keys (repeatedly (count forms) (fn [] (gensym "recur-")))]
     (with-form-wrappers [ctx 'recur :special]
@@ -211,10 +209,10 @@
                     params)))))
 
 (defn load-fn-commands
-  [{:keys [form->commands argdef-stack recur-idx in-macro?] :as ctx} metainf]
+  [{:keys [->commands argdef-stack recur-idx in-macro?] :as ctx} metainf]
   (reduce (fn [accum k]
             (let [{:keys [argdefs body]} (get accum k)
-                  attrs* (assoc ctx :argdef-stack (conj argdef-stack argdefs))
+                  ctx* (assoc ctx :argdef-stack (conj argdef-stack argdefs))
                   commands* (concat (map (fn [k argdef]
                                            (action->command :bind-name
                                              :bind-id argdef
@@ -225,7 +223,7 @@
                                          argdefs)
                                     (action->commands :recur-target :idx recur-idx :in-macro? false)
                                     #_(with-implicit-do (form->commands attrs* body))
-                                    (form->commands attrs* body))]
+                                    (->commands ctx* body))]
               (update accum k #(assoc % :commands commands*))))
           metainf
           (keys metainf)))
@@ -244,36 +242,33 @@
   [{:keys [form->commands] :as ctx} form]
   (assert (= 2 (count form))
           "Invalid arguments to throw, expects single throwable instance")
-  (let [cmds (form->commands ctx (second form))]
-    (with-form-wrappers [ctx 'throw :special]
-      (with-stack-frame
-        (concat cmds (action->commands :invoke-throw))))))
+  (with-form-wrappers [ctx 'throw :special]
+    (with-stack-frame
+      (concat (form->commands (second form))
+              (action->commands :invoke-throw)))))
 
 (defn catch->cmds
   [{:keys [form->commands in-macro?] :as ctx} ex-sym body]
-  (let [form->commands (partial form->commands ctx)]
-    (with-form-wrappers [ctx 'catch :special]
-      (concat (action->commands :bind-name
-                :bind-id ex-sym :bind-from :state :state-id :caught-ex :in-macro? in-macro?)
-              #_(with-implicit-do (mapcat form->commands body))
-              (mapcat form->commands body)
-              (action->commands :unbind-name :bind-id ex-sym :in-macro? in-macro?)))))
+  (with-form-wrappers [ctx 'catch :special]
+    (concat (action->commands :bind-name
+              :bind-id ex-sym :bind-from :state :state-id :caught-ex :in-macro? in-macro?)
+            #_(with-implicit-do (mapcat form->commands body))
+            (mapcat form->commands body)
+            (action->commands :unbind-name :bind-id ex-sym :in-macro? in-macro?))))
 
 (defn finally->cmds
   [{:keys [form->commands] :as ctx} body]
-  (let [form->commands (partial form->commands ctx)]
-    (with-form-wrappers [ctx 'finally :special]
-      (concat (action->commands :begin-finally)
-              (action->commands :set-context :props {:is-finally? true})
-              #_(with-implicit-do (mapcat form->commands body))
-              (mapcat form->commands body)
-              (action->commands :set-context :props {:is-finally? false})
-              (action->commands :end-finally)))))
+  (with-form-wrappers [ctx 'finally :special]
+    (concat (action->commands :begin-finally)
+            (action->commands :set-context :props {:is-finally? true})
+            #_(with-implicit-do (mapcat form->commands body))
+            (mapcat form->commands body)
+            (action->commands :set-context :props {:is-finally? false})
+            (action->commands :end-finally))))
 
 (defn handle-try-catch-finally
   [{:keys [form->commands in-macro?] :as ctx} form]
-  (let [form->commands (partial form->commands ctx)
-        args (rest form)
+  (let [args (rest form)
         finally* (let [finally? (last args)]
                    (when (finally-form? finally?) finally?))
         args*   (if-not finally* args (butlast args))
@@ -340,13 +335,19 @@
 ;; Generators: Middleware
 ;; ------------------------------------------------------------------------------------------------
 
+(defn wrap-form-to-commands
+  [handler]
+  (fn [{:keys [->commands] :as ctx} form]
+    (handler (assoc ctx :form->commands (partial ->commands ctx))
+             form)))
+
 (defn wrap-check-macro
   [handler]
   (fn [ctx form]
-    (let [attrs (if (::pt/macro-arg (meta form))
-                  (assoc ctx :in-macro? false)
-                  ctx)]
-      (handler attrs form))))
+    (let [ctx* (if (::pt/macro-arg (meta form))
+                 (assoc ctx :in-macro? false)
+                 ctx)]
+      (handler ctx* form))))
 
 (defn wrap-form-depth
   [handler]
@@ -356,6 +357,7 @@
 (defn wrap-middleware
   [handler]
   (-> handler
+      wrap-form-to-commands
       wrap-form-depth
       wrap-check-macro))
 
@@ -390,19 +392,21 @@
 ;; Generators: Form Conversion -> Commands
 ;; ------------------------------------------------------------------------------------------------
 
-(defn form->commands
-  [attrs form]
+(defn ->commands
+  [context form]
   (if-not (coll? form)
     (seq (action->commands :scalar :form form))
     (let [h (or (get form-handlers (first form))
                 (get form-handlers (ptu/classify form)))]
       (if h
-        (lazy-seq (h attrs form))
+        (lazy-seq (h context form))
         (seq (action->commands :not-implemented :form form))))))
 
-(defn new-form-ctx
+(defn new-generator-ctx
   []
-  {:form->commands form->commands
+  {:->commands ->commands
+   ;; form->commands will be added with middleware
+   :form->commands nil
    :argdef-stack (list)
    :form-depth -1
    ;; TODO: replace recur-idx with an AtomicInteger since it is not consistently
@@ -421,8 +425,8 @@
   ([form args ns-sym]
    (assert (or (nil? args) (vector? args)) "args must be a vector or nil")
    (assert (symbol? ns-sym) "ns-sym must be a symbol")
-   (let [attrs (cond-> (new-form-ctx)
+   (let [attrs (cond-> (new-generator-ctx)
                  true (assoc :ns-sym ns-sym)
                  true (assoc :enable-cmd-gen? (not (boolean args)))
                  args (assoc :args args))]
-     (form->commands attrs form))))
+     (->commands attrs form))))
