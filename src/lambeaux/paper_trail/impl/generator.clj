@@ -54,10 +54,10 @@
   [[{:keys [form-depth in-macro-impl?] :as _ctx} operation* type*] command-seq]
   (let [depth form-depth]
     (concat (action->commands :begin-form
-              :form-depth depth :type type* :op operation* :impl? in-macro-impl?)
+              :form-depth depth :type type* :op operation* :in-macro? in-macro-impl?)
             command-seq
             (action->commands :end-form
-              :form-depth depth :type type* :op operation* :impl? in-macro-impl?))))
+              :form-depth depth :type type* :op operation* :in-macro? in-macro-impl?))))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Generators: 'Callable' Primitives (run/compile time)
@@ -120,13 +120,13 @@
                         (with-stack-frame
                           (concat (form->commands bform)
                                   (action->commands :bind-name
-                                    :bind-id bname :bind-from :call-stack :impl? in-macro-impl?))))
+                                    :bind-id bname :bind-from :call-stack :in-macro? in-macro-impl?))))
                       bindings)
               #_(with-implicit-do (mapcat form->commands body))
               (mapcat form->commands body)
               (mapcat (fn [[bname _]]
                         (action->commands :unbind-name
-                          :bind-id bname :impl? in-macro-impl?))
+                          :bind-id bname :in-macro? in-macro-impl?))
                       bindings)))))
 
 (defn handle-loop
@@ -145,13 +145,13 @@
                                   (action->commands :bind-name
                                     :bind-id bname
                                     :bind-from :call-stack
-                                    :impl? in-macro-impl?))))
+                                    :in-macro? in-macro-impl?))))
                       bindings)
-              (action->commands :recur-target :idx recur-idx :impl? in-macro-impl?)
+              (action->commands :recur-target :idx recur-idx :in-macro? in-macro-impl?)
               #_(with-implicit-do (mapcat #(form->commands ctx* %) body))
               (mapcat #(form->commands ctx* %) body)
               (mapcat (fn [[bname _]]
-                        (action->commands :unbind-name :bind-id bname :impl? in-macro-impl?))
+                        (action->commands :unbind-name :bind-id bname :in-macro? in-macro-impl?))
                       bindings)))))
 
 (defn handle-recur
@@ -164,19 +164,19 @@
       (concat (mapcat (fn [k form*]
                         (concat (form->commands form*)
                                 (action->commands :capture-state
-                                  :state-id k :impl? in-macro-impl?)))
+                                  :state-id k :in-macro? in-macro-impl?)))
                       state-keys
                       forms)
               (mapcat (fn [k argdef]
-                        [(action->command :unbind-name :bind-id argdef :impl? in-macro-impl?)
+                        [(action->command :unbind-name :bind-id argdef :in-macro? in-macro-impl?)
                          (action->command :bind-name
                            :bind-id argdef
                            :bind-from :state
                            :state-id k
-                           :impl? in-macro-impl?)])
+                           :in-macro? in-macro-impl?)])
                       state-keys
                       (peek argdef-stack))
-              (action->commands :replay-commands :idx recur-idx :impl? in-macro-impl?)))))
+              (action->commands :replay-commands :idx recur-idx :in-macro? in-macro-impl?)))))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Generators: (fn ... ) Special Form
@@ -220,10 +220,10 @@
                                              :bind-id argdef
                                              :bind-from :state
                                              :state-id k
-                                             :impl? in-macro-impl?))
+                                             :in-macro? in-macro-impl?))
                                          (map #(str "arg-" %) (range (count argdefs)))
                                          argdefs)
-                                    (action->commands :recur-target :idx recur-idx :impl? false)
+                                    (action->commands :recur-target :idx recur-idx :in-macro? false)
                                     #_(with-implicit-do (form->commands attrs* body))
                                     (form->commands attrs* body))]
               (update accum k #(assoc % :commands commands*))))
@@ -254,10 +254,10 @@
   (let [form->commands (partial form->commands ctx)]
     (with-form-wrappers [ctx 'catch :special]
       (concat (action->commands :bind-name
-                :bind-id ex-sym :bind-from :state :state-id :caught-ex :impl? in-macro-impl?)
+                :bind-id ex-sym :bind-from :state :state-id :caught-ex :in-macro? in-macro-impl?)
               #_(with-implicit-do (mapcat form->commands body))
               (mapcat form->commands body)
-              (action->commands :unbind-name :bind-id ex-sym :impl? in-macro-impl?)))))
+              (action->commands :unbind-name :bind-id ex-sym :in-macro? in-macro-impl?)))))
 
 (defn finally->cmds
   [{:keys [form->commands] :as ctx} body]
@@ -294,10 +294,10 @@
                                catches)
                 :finally (when finally*
                            (finally->cmds ctx (rest finally*)))
-                :impl? in-macro-impl?)
+                :in-macro? in-macro-impl?)
               (with-implicit-do (mapcat form->commands body))
               ;; (mapcat form->commands body)
-              (action->commands :cleanup-try :id id :impl? in-macro-impl?)))))
+              (action->commands :cleanup-try :id id :in-macro? in-macro-impl?)))))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Generators: Misc / Old / Outdated / Incomplete
@@ -309,14 +309,14 @@
 #_(defn handle-def
     [{:keys [form->commands argdef-stack recur-idx in-macro-impl? enable-cmd-gen? args] :as attrs} form]
     (if enable-cmd-gen?
-      (concat [{:cmd :begin-form :type :special :op 'def :impl? in-macro-impl?}]
+      (concat [{:cmd :begin-form :type :special :op 'def :in-macro? in-macro-impl?}]
               (when (> (count form) 2)
                 (form->commands attrs (last form)))
               [{:cmd :intern-var
                 :var-id (second form)
                 :has-root-binding? (> (count form) 2)
-                :impl? in-macro-impl?}
-               {:cmd :end-form :type :special :op 'def :impl? in-macro-impl?}])
+                :in-macro? in-macro-impl?}
+               {:cmd :end-form :type :special :op 'def :in-macro? in-macro-impl?}])
       (if-not (and (> (count form) 2)
                    (or (= 'fn (first (last form)))
                        (= 'fn* (first (last form)))
@@ -328,10 +328,10 @@
                           :bind-id argdef
                           :bind-from :command-value
                           :value arg
-                          :impl? false})
+                          :in-macro? false})
                        argdefs
                        args)
-                  [{:cmd :recur-target :idx recur-idx :impl? false}]
+                  [{:cmd :recur-target :idx recur-idx :in-macro? false}]
                   (form->commands
                    (assoc attrs :enable-cmd-gen? true :argdef-stack (conj argdef-stack argdefs))
                    body))))))

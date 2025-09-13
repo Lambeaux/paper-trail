@@ -87,13 +87,13 @@
 (defn copy-scope-cmds
   ([keyvals]
    (copy-scope-cmds false keyvals))
-  ([impl? keyvals]
+  ([in-macro? keyvals]
    (map (fn [[k v]]
           {:action :bind-name
            :bind-id k
            :bind-from :command-value
            :value (peek v)
-           :impl? impl?})
+           :in-macro? in-macro?})
         (seq keyvals))))
 
 (defn process-create-fn
@@ -234,7 +234,7 @@
 
 (defn process-bind-name
   [{:keys [state call-stack source-scope impl-scope]
-    [{:keys [bind-id bind-from impl? value state-id]} & _] :commands
+    [{:keys [bind-id bind-from in-macro? value state-id]} & _] :commands
     :as ctx}]
   (let [val-to-bind  (case bind-from
                        :command-value value
@@ -246,7 +246,7 @@
                          nil ::pt/nil
                          false ::pt/false
                          val-to-bind))
-        keyval-pairs (if impl?
+        keyval-pairs (if in-macro?
                        [:impl-scope (update impl-scope bind-id #(conj % val-to-bind))]
                        [:source-scope (update source-scope bind-id #(conj % val-to-bind))])]
     (model/default-update ctx (if (not= :call-stack bind-from)
@@ -255,9 +255,9 @@
 
 (defn process-unbind-name
   [{:keys [source-scope impl-scope]
-    [{:keys [bind-id impl?]} & _] :commands
+    [{:keys [bind-id in-macro?]} & _] :commands
     :as ctx}]
-  (let [keyvals (if impl?
+  (let [keyvals (if in-macro?
                   [:impl-scope (update impl-scope bind-id pop)]
                   [:source-scope (update source-scope bind-id pop)])]
     (model/default-update ctx keyvals)))
