@@ -9,8 +9,9 @@
   (:require [clojure.set :as set]
             [lambeaux.paper-trail.impl.lib :refer [assert*]]
             [lambeaux.paper-trail :as-alias pt])
-  (:import [clojure.lang Cons]))
+  (:import [clojure.lang Cons Namespace]))
 
+;; TODO: make this invokable to increment, and derefable to read current state without change
 (defn counter-fn
   "Returns a no-arg fn that returns the next integer in a ever-increasing
    sequence of integers, starting at 0."
@@ -26,9 +27,38 @@
              (str "There must be no overlap between the keysets but found "
                   (pr-str overlap)))))
 
-;; ----------------------------------------------------------------------------
-;; Predicates / Resolvers
-;; ----------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
+;; Predicates / Resolvers (NEW)
+;; ------------------------------------------------------------------------------------------------
+
+(defn sym-split
+  "Returns a 2-tuple of the symbol split apart: [(f (namespace sym)) (f (name sym))]. Will only
+   call f for truthy inputs. Default f is to coerce to symbol."
+  ([sym]
+   (sym-split symbol sym))
+  ([f sym]
+   (when sym
+     (vector
+      (when-let [sym-ns (namespace sym)]
+        (f sym-ns))
+      (when-let [sym-name (name sym)]
+        (f sym-name))))))
+
+(defn ns-exists?
+  "If ns-in is a namespace, returns true. If ns-in is a symbol, returns true if the namespace
+   named by that symbol exists."
+  [ns-in]
+  (try
+    (boolean
+     (or (instance? Namespace ns-in)
+         (and (symbol? ns-in)
+              (the-ns ns-in))))
+    (catch Exception _e
+      false)))
+
+;; ------------------------------------------------------------------------------------------------
+;; Predicates / Resolvers (OLD)
+;; ------------------------------------------------------------------------------------------------
 
 (def clojure-core-symbols->vars
   (ns-publics (the-ns 'clojure.core)))
@@ -85,7 +115,7 @@
 (defn map-impl-fn [ctx]
   #(if (accessible-fn? ctx %) (->impl ctx %) %))
 
-;; ----------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
 
 (def temp-ctx {::pt/current-ns *ns*})
 
@@ -120,9 +150,9 @@
   ;;;; Form type hierarchy ;;;;
   (defonce fth (create-form-hierarchy)))
 
-;; ----------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
 ;; Form Classification
-;; ----------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
 
 (defn macro-type
   "Returns the macro type when invokable form x is a macro, else nil."

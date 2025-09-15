@@ -12,7 +12,8 @@
             [lambeaux.paper-trail.impl.generator :as ptg]))
 
 (def default-requires
-  ['[lambeaux.paper-trail.repl :as r]
+  ['[lambeaux.paper-trail.alpha.api :as pt]
+   '[lambeaux.paper-trail.repl :as r]
    '[lambeaux.paper-trail.impl.core :as impl]
    '[lambeaux.paper-trail.impl.generator :as ptg]
    '[lambeaux.paper-trail.impl.util :as ptu]
@@ -31,6 +32,34 @@
   `(binding [*out* (java.io.PrintWriter. System/out)
              *err* (java.io.PrintWriter. System/err)]
      ~@body))
+
+(defn emit-msg*
+  "Just a test fn for checking pt's invocation facilities."
+  [msg]
+  (with-std-out (println msg)
+    msg))
+
+(defn say-hello*
+  "Just a test fn for checking pt's invocation facilities."
+  [coll]
+  (let [tar-most (butlast coll)
+        tar-last (last coll)
+        msg (apply str (concat (list "Hello ")
+                               (interpose ", " tar-most)
+                               (list ", and " tar-last "!")))]
+    (emit-msg* msg)))
+
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
+(defn say-hello
+  "Just a test fn for checking pt's invocation facilities."
+  ([]
+   (emit-msg* "Hello!"))
+  ([target]
+   (emit-msg* (str "Hello " target "!")))
+  ([tx ty]
+   (say-hello* (list tx ty)))
+  ([tx ty tz & more]
+   (say-hello* (concat [tx ty tz] more))))
 
 #_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (defn decompose-form
@@ -54,6 +83,15 @@
     (merge (select-keys ctx [:is-throwing? :is-finally?])
            (select-keys fctx [:source-scope :call-stack-primary :call-stack-finally])
            {:commands (take 15 commands)})))
+
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
+(defmacro with-ex-val
+  "Return an exception as if it was a value."
+  [& body]
+  (let [ex-sym (gensym "e")]
+    `(try
+       ~@body
+       (catch Exception ~ex-sym ~ex-sym))))
 
 #_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (defn with-executor-middleware
