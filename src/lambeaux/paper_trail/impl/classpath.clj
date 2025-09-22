@@ -5,20 +5,19 @@
 ;; By using this software in any fashion, you are agreeing to be bound by
 ;; the terms of this license.
 ;; You must not remove this notice, or any other, from this software.
-(ns lambeaux.paper-trail.wip.classpath
+(ns lambeaux.paper-trail.impl.classpath
   (:require [clojure.tools.reader :as rdr]
             [clojure.java.classpath :as jc]
             [clojure.string :as str]
             [clojure.java.io :as io]
-            [clojure.walk :as w]
             [edamame.core :as ed])
   (:import [clojure.lang Namespace]
            [java.io File]
            [java.util.jar JarFile JarEntry JarInputStream]))
 
-;; ----------------------------------------------------------------------------------------
-;; MISC
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
+;; Classpath: Helpers
+;; ------------------------------------------------------------------------------------------------
 
 (defn new-jar-input-stream
   [stream-in]
@@ -36,9 +35,9 @@
   [obj]
   (instance? JarEntry obj))
 
-;; ----------------------------------------------------------------------------------------
-;; PLATFORM AGNOSTIC SEPARATOR REGEX
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
+;; Classpath: Platform Agnostic Separator Regex
+;; ------------------------------------------------------------------------------------------------
 
 (defn path-regex
   "Build a platform agnostic path regex using sep as the separator string."
@@ -58,30 +57,9 @@
   (fn [obj]
     (pred (str/split (str obj) path-regex))))
 
-;; ----------------------------------------------------------------------------------------
-;; PREDS
-;; ----------------------------------------------------------------------------------------
-
-(def extensions-clojure  #{:clj :cljc})
-(def extensions-artifact #{:jar})
-
-(defn only-clojure-exts?
-  [path-parts]
-  (contains? extensions-clojure
-             (keyword (last path-parts))))
-
-(defn only-artifact-exts?
-  [path-parts]
-  (contains? extensions-artifact
-             (keyword (last path-parts))))
-
-(defn only-no-metainf
-  [path-parts]
-  (not= "META-INF" (first path-parts)))
-
-;; ----------------------------------------------------------------------------------------
-;; CLASSPATH FORM PARSING
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
+;; Classpath: Form Parsing
+;; ------------------------------------------------------------------------------------------------
 
 (def ^:dynamic *default-edamame-config*
   {:deref           true
@@ -91,6 +69,7 @@
    :regex           true
    :var             true
    :auto-resolve-ns true
+   ;; todo: keeping around as a reminder, will remove after more testing
    #_#_:syntax-quote    true})
 
 (defn resolve-symbol
@@ -107,6 +86,7 @@
                rdr* (ed/reader rdr)]
      (let [ns-form (ed/parse-next rdr* (ed/normalize-opts *default-edamame-config*))
            {ns-name* :current ns-aliases* :aliases} (ed/parse-ns-form ns-form)
+           ;; todo: keeping around as a reminder, will remove after more testing
            #_#_opts (ed/normalize-opts *default-edamame-config*)
            opts (ed/normalize-opts
                  (assoc *default-edamame-config*
@@ -124,9 +104,26 @@
                                           :artifact-path (when artifact (str artifact))))
                          (into []))}))))
 
-;; ----------------------------------------------------------------------------------------
-;; CLASSPATH SOURCE LOADING
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
+;; Classpath: Source Loading
+;; ------------------------------------------------------------------------------------------------
+
+(def extensions-clojure  #{:clj :cljc})
+(def extensions-artifact #{:jar})
+
+(defn only-clojure-exts?
+  [path-parts]
+  (contains? extensions-clojure
+             (keyword (last path-parts))))
+
+(defn only-artifact-exts?
+  [path-parts]
+  (contains? extensions-artifact
+             (keyword (last path-parts))))
+
+(defn only-no-metainf
+  [path-parts]
+  (not= "META-INF" (first path-parts)))
 
 (defn read-raw-file
   ([obj-in]
@@ -169,9 +166,9 @@
           (map (partial read-jar-entry (JarFile. obj-in)))
           (into [])))))
 
-;; ----------------------------------------------------------------------------------------
-;; CLASSPATH SEQ
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
+;; Classpath: Namespace Sequence
+;; ------------------------------------------------------------------------------------------------
 
 (def is-directory?   #(when (is-file? %) (.isDirectory %)))
 (def is-source-file? (path-filter path-os only-clojure-exts?))
@@ -190,6 +187,9 @@
          (contains? obj :forms)) :parsed
     :else                        :unsupported))
 
+;; todo: add another seq fn for just discovering namespaces, but not actually parsing them
+;;   (useful for cheaply building a namespace index for lazy loading source 1 fn at a time)
+;; todo: add opts so you can filter out expensive tasks, like reading from jar files
 (defn namespace-seq
   "Expands a classpath into a seq of maps that contain all the forms in each
    discovered namespace. Defaults to clojure.java.classpath's calculated classpath.
@@ -199,7 +199,7 @@
   ([[file & more :as _classpath-seq]]
    (let [file-type (classify-obj file)
          lazy-rest (lazy-seq (namespace-seq more))]
-     (println (format "Expanding [%s] %s" file-type (str file)))
+     ;; (println (format "Expanding [%s] %s" file-type (str file)))
      (case file-type
        :parsed        (cons file lazy-rest)
        :raw-file      (cons (read-raw-file file) lazy-rest)
@@ -211,114 +211,3 @@
                                    (class file)
                                    (str file)))
                           lazy-rest)))))
-
-;; Different streamable types on the classpath
-{:type      [:raw-directory :raw-file :jar-archive :jar-entry]
- :is-dir?    false
- :is-zipped? false
- :is-local?  false}
-
-;; ----------------------------------------------------------------------------------------
-;; EDAMAME EXPERIMENTS
-;; ----------------------------------------------------------------------------------------
-
-(defn make-opts
-  "Create Edamame options."
-  ([]
-   (make-opts true))
-  ([fn-handler]
-   (assert (or (boolean? fn-handler) (fn? fn-handler))
-           "fn-handler must be boolean or fn")
-   {:deref true
-    :quote true
-    :fn fn-handler
-    :read-eval false
-    :regex true
-    :var true}))
-
-(defn parse
-  "Parse Clojure source using Edamame."
-  ([text]
-   (parse :default text))
-  ([mode-or-fn text]
-   (case mode-or-fn
-     :default  (ed/parse-string text (make-opts))
-     :identity (ed/parse-string text (make-opts identity))
-     (ed/parse-string text (make-opts mode-or-fn)))))
-
-(defn pt-arg-namegen
-  "This is one potential strategy Paper Trail can use for generating argument
-   names. Since symbols support metadata, there's a lot of flexibility here.
-   The UUID pieces might not be necessary. An atomic counter here in static
-   memory might suffice."
-  [arg-names sym]
-  (let [randomness (apply str (take 8 (str (random-uuid))))
-        arg-num (or (seq (rest (name sym))) [1])
-        name-parts (concat ["pt_arg_"] arg-num ["_" randomness])
-        new-name (vary-meta (symbol (apply str name-parts))
-                            assoc
-                            :paper.trail/generated-name? true
-                            :paper.trail/arg-idx (parse-long (apply str arg-num)))]
-    (swap! arg-names conj new-name)
-    new-name))
-
-(defn pt-arg-rename
-  "Simple mapper for use with clojure.walk for renaming fn arg symbols in a
-   given input form."
-  [arg-names form]
-  (if-not (and (simple-symbol? form)
-               (str/starts-with? (name form) "%"))
-    form
-    (pt-arg-namegen arg-names form)))
-
-(defn pt-fn-reader
-  "This is one potential strategy Paper Trail can use for transforming functions
-   defined using the shorthand reader notation."
-  [form]
-  (let [arg-names (atom #{})
-        body (w/prewalk (partial pt-arg-rename arg-names) form)
-        arglist (into [] (sort @arg-names))]
-    (list 'fn* arglist body)))
-
-(comment
-
-  "EDAMAME EXAMPLES"
-
-  "Never would have thought this was valid, but it is."
-  (let [%8 10
-        f (fn [%1] (inc %1))]
-    (f %8))
-
-  "Might prefer this instead. More readable ?? Possibly clashes with existing names ??"
-  (let [a8 10
-        f (fn [a1] (inc a1))]
-    (f a8))
-
-  (parse :default "#(inc %)")
-  (parse :default "(map #(inc %) [1 2 3])")
-
-  (parse :identity "#(inc %)")
-  (parse :identity "(map #(inc %) [1 2 3])")
-
-  (parse pt-fn-reader "#(inc %)")
-  (parse pt-fn-reader "(map #(inc %) [1 2 3])")
-  (parse pt-fn-reader "#(* %1 %2 %3)"))
-
-(comment
-
-  "Checking our work"
-
-  (defn verify-meta
-    [form]
-    (let [state (atom [])
-          walker (fn [form*]
-                   (if (simple-symbol? form*)
-                     (swap! state conj [form* (meta form*)])
-                     (swap! state conj [(type form*) (meta form*)]))
-                   form*)]
-      (w/prewalk walker form)
-      (deref state)))
-
-  ;; watch out, you're losing edamame metadata with your custom 
-  ;; reader fn ... [fn* nil]
-  (verify-meta (parse pt-fn-reader "#(* %1 %2 %3)")))

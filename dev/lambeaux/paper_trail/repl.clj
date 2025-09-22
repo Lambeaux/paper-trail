@@ -22,6 +22,7 @@
   ['[lambeaux.paper-trail.alpha.api :as pt]
    '[lambeaux.paper-trail.repl :as r]
    '[lambeaux.paper-trail.impl.core :as impl]
+   '[lambeaux.paper-trail.impl.classpath :as ptc]
    '[lambeaux.paper-trail.impl.generator :as ptg]
    '[lambeaux.paper-trail.impl.util :as ptu]
    '[lambeaux.paper-trail.impl.executor :as pte]
@@ -29,7 +30,7 @@
    '[lambeaux.paper-trail.impl.executor.data-model :as model]
    '[lambeaux.paper-trail.impl.executor.middleware :as middleware]
    '[lambeaux.paper-trail.conf-core :as conf]
-   '[lambeaux.paper-trail.wip.classpath :as wcp]
+   '[lambeaux.paper-trail.wip.edamame :as wed]
    '[lambeaux.paper-trail.wip.interop :as wiop]])
 
 (defn require-pt

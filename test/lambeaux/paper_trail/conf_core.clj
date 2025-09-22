@@ -11,7 +11,38 @@
             [lambeaux.paper-trail.impl.core :as impl]
             [lambeaux.paper-trail :as-alias pt])
   (:import  [clojure.lang ExceptionInfo Atom]
-            [java.io IOException]))
+            [java.io IOException ByteArrayInputStream]))
+
+;; ------------------------------------------------------------------------------------------------
+;; Conf: Currently used for testing classpath form parsing
+;; ------------------------------------------------------------------------------------------------
+
+(defn str->input-stream
+  ([str-in]
+   (str->input-stream str-in "UTF-8"))
+  ([str-in charset]
+   (ByteArrayInputStream. (.getBytes str-in charset))))
+
+(defn load-ns-for-test!
+  [ns-text]
+  (let [active-ns *ns*]
+    (load-string ns-text)
+    (in-ns (ns-name active-ns))))
+
+(defn gather
+  "Collects subforms in form when pred is true. Returns the coll of subforms."
+  [pred form]
+  (let [subforms (atom [])
+        f* (fn [x]
+             (when (pred x)
+               (swap! subforms conj x))
+             x)]
+    (w/postwalk f* form)
+    (deref subforms)))
+
+;; ------------------------------------------------------------------------------------------------
+;; Conf: Exception Comparable & Eval Comparison
+;; ------------------------------------------------------------------------------------------------
 
 ;; runtime ex
 (defn new-illegal-arg-ex
