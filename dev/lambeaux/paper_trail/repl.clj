@@ -11,7 +11,14 @@
             [lambeaux.paper-trail.impl.executor.middleware :as middleware]
             [lambeaux.paper-trail.impl.generator :as ptg]))
 
-(def default-requires
+(def default-thirdparty-requires
+  ['[clojure.java.classpath :as jc]
+   '[clojure.string :as str]
+   '[clojure.java.io :as io]
+   '[clojure.walk :as w]
+   '[edamame.core :as ed]])
+
+(def default-project-requires
   ['[lambeaux.paper-trail.alpha.api :as pt]
    '[lambeaux.paper-trail.repl :as r]
    '[lambeaux.paper-trail.impl.core :as impl]
@@ -21,11 +28,14 @@
    '[lambeaux.paper-trail.impl.executor.call-stack :as stack]
    '[lambeaux.paper-trail.impl.executor.data-model :as model]
    '[lambeaux.paper-trail.impl.executor.middleware :as middleware]
-   '[lambeaux.paper-trail.conf-core :as conf]])
+   '[lambeaux.paper-trail.conf-core :as conf]
+   '[lambeaux.paper-trail.wip.classpath :as wcp]
+   '[lambeaux.paper-trail.wip.interop :as wiop]])
 
 (defn require-pt
   []
-  (apply require default-requires))
+  (apply require (concat default-project-requires
+                         default-thirdparty-requires)))
 
 (defmacro with-std-out
   [& body]
