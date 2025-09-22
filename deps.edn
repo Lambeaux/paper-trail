@@ -1,7 +1,7 @@
 {:paths ["src"]
  :deps {org.clojure/clojure        {:mvn/version "1.11.1"}
         org.clojure/java.classpath {:mvn/version "1.1.0"}
-        borkdude/edamame           {:mvn/version "1.4.27"}}
+        borkdude/edamame           {:mvn/version "1.4.32"}}
  ;; -----------------------------------------------------------------------------------------------
  ;; Start a development repl:   clj -M:dev:cider-clj
  ;; Run the unit tests:         clj -X:test
