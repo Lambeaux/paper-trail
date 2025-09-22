@@ -91,12 +91,13 @@
 (def class->kind {File :file JarEntry :entry})
 
 (def ^:dynamic *default-edamame-config*
-  {:deref     true
-   :quote     true
-   :fn        true
-   :read-eval false
-   :regex     true
-   :var       true})
+  {:deref           true
+   :quote           true
+   :fn              true
+   :read-eval       false
+   :regex           true
+   :var             true
+   :auto-resolve-ns true})
 
 (defn read-forms
   ([file-or-entry readable]
