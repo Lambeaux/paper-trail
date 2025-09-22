@@ -6,13 +6,14 @@
 ;; the terms of this license.
 ;; You must not remove this notice, or any other, from this software.
 (ns lambeaux.paper-trail.wip.classpath
-  (:require [clojure.java.classpath :as jc]
+  (:require [clojure.tools.reader :as rdr]
+            [clojure.java.classpath :as jc]
             [clojure.string :as str]
             [clojure.java.io :as io]
-            [clojure.set :as set]
             [clojure.walk :as w]
             [edamame.core :as ed])
-  (:import [java.io File]
+  (:import [clojure.lang Namespace]
+           [java.io File]
            [java.util.jar JarFile JarEntry JarInputStream]))
 
 ;; ----------------------------------------------------------------------------------------
@@ -63,7 +64,6 @@
 
 (def extensions-clojure  #{:clj :cljc})
 (def extensions-artifact #{:jar})
-(def extensions-all (set/union extensions-clojure extensions-artifact))
 
 (defn only-clojure-exts?
   [path-parts]
@@ -83,13 +83,6 @@
 ;; CLASSPATH FORM PARSING
 ;; ----------------------------------------------------------------------------------------
 
-(comment
-  (fn [file*]
-    (contains? extensions-clojure
-               (keyword (last (str/split (str file*) #"\."))))))
-
-(def class->kind {File :file JarEntry :entry})
-
 (def ^:dynamic *default-edamame-config*
   {:deref           true
    :quote           true
@@ -97,23 +90,39 @@
    :read-eval       false
    :regex           true
    :var             true
-   :auto-resolve-ns true})
+   :auto-resolve-ns true
+   #_#_:syntax-quote    true})
+
+(defn resolve-symbol
+  [ns-override sym]
+  (assert (instance? Namespace ns-override) "ns-override must be a namespace")
+  (binding [*ns* ns-override]
+    (rdr/resolve-symbol sym)))
 
 (defn read-forms
   ([file-or-entry readable]
    (read-forms nil file-or-entry readable))
   ([artifact file-or-entry readable]
-   (let [opts (ed/normalize-opts *default-edamame-config*)]
-     (with-open [rdr  (io/reader readable)
-                 rdr* (ed/reader rdr)]
-       {:file     file-or-entry
-        :artifact artifact
-        :forms    (->> (repeatedly (partial ed/parse-next rdr* opts))
-                       (take-while #(not= % :edamame.core/eof))
-                       (map #(vary-meta % assoc
-                                        :file-path (str file-or-entry)
-                                        :artifact-path (when artifact (str artifact))))
-                       (into []))}))))
+   (with-open [rdr  (io/reader readable)
+               rdr* (ed/reader rdr)]
+     (let [ns-form (ed/parse-next rdr* (ed/normalize-opts *default-edamame-config*))
+           {ns-name* :current ns-aliases* :aliases} (ed/parse-ns-form ns-form)
+           #_#_opts (ed/normalize-opts *default-edamame-config*)
+           opts (ed/normalize-opts
+                 (assoc *default-edamame-config*
+                        :syntax-quote
+                        {:resolve-symbol (partial resolve-symbol (the-ns ns-name*))}))]
+       {:file       file-or-entry
+        :artifact   artifact
+        :ns-name    ns-name*
+        :ns-aliases ns-aliases*
+        :ns-form    ns-form
+        :forms      (->> (repeatedly (partial ed/parse-next rdr* opts))
+                         (take-while #(not= % :edamame.core/eof))
+                         (map #(vary-meta % assoc
+                                          :file-path (str file-or-entry)
+                                          :artifact-path (when artifact (str artifact))))
+                         (into []))}))))
 
 ;; ----------------------------------------------------------------------------------------
 ;; CLASSPATH SOURCE LOADING
@@ -208,69 +217,6 @@
  :is-dir?    false
  :is-zipped? false
  :is-local?  false}
-
-;; ----------------------------------------------------------------------------------------
-;; CLASSPATH OUTDATED EXPERIMENTS
-;; ----------------------------------------------------------------------------------------
-
-(declare obj->map-fn)
-
-(defn children-fn
-  [{:keys [obj kind ext dir?] :as m} _parent]
-  (case [kind ext]
-    [:file nil] (fn []
-                  (when dir?
-                    (mapv (obj->map-fn m) (.listFiles obj))))
-    [:file :jar] (fn []
-                   (with-open [jar-stream (JarInputStream. (io/input-stream obj))]
-                     (into []
-                           (comp (take-while identity)
-                                 (map (obj->map-fn m)))
-                           (repeatedly (fn [] (.getNextJarEntry jar-stream))))))
-    (constantly [])))
-
-(defn content-fn
-  [{:keys [obj kind] :as _m} parent]
-  (case kind
-    :file  (fn [] (slurp obj))
-    :entry (fn [] (let [jar-file (JarFile. (:obj parent))]
-                    (slurp (.getInputStream jar-file obj))))
-    (constantly nil)))
-
-(defn obj->map-fn
-  [parent]
-  (fn [obj]
-    (let [kind (class->kind (class obj))
-          dir? (.isDirectory obj)
-          ext  (-> (.getName obj)
-                   (str/split #"\.")
-                   last
-                   keyword
-                   extensions-all)
-          m    {:obj obj :kind kind :dir? dir? :ext ext}]
-      (assoc m
-             :children (children-fn m parent)
-             :content  (content-fn  m parent)))))
-
-(defn files->source-cache
-  [files]
-  (map (obj->map-fn nil) files))
-
-(comment
-
-  (def my-test-map
-    (->> (jc/classpath)
-         files->source-cache
-         (map #(vector (.getName (:obj %)) %))
-         (into {})))
-
-  (mapcat (fn [{:keys [children]}]
-            (children))
-          [(get my-test-map "edamame-1.4.27.jar")])
-
-  (binding [*out* (java.io.PrintWriter. System/out)
-            *err* (java.io.PrintWriter. System/err)]
-    (println "Hi there")))
 
 ;; ----------------------------------------------------------------------------------------
 ;; EDAMAME EXPERIMENTS

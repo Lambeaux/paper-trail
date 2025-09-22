@@ -18,7 +18,16 @@
       (println "Reloading done")
       result)))
 
-(comment (refresh))
+(defn refresh-all []
+  (r/with-std-out
+    (println "Reloading Clojure on classpath")
+    (let [result (tnr/refresh-all)]
+      (println "Reloading done")
+      result)))
+
+(comment
+  (refresh)
+  (refresh-all))
 
 (comment "How to run the old interpreter versions for comparison purposes."
 
