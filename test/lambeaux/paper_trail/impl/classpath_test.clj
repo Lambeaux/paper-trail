@@ -43,8 +43,8 @@
              [test-script-peer test-script-local]))
   (let [form-map (ptc/read-forms no-src-file
                                  (conf/str->input-stream test-script-local))
-        {:keys [file forms] ns-name* :ns-name} form-map]
-    (is (= no-src-file file))
+        {:keys [path-to-ns forms] ns-name* :ns-name} form-map]
+    (is (= no-src-file path-to-ns))
     (is (= 'lambeaux.paper-trail.testns.bob ns-name*))
     (is (= true (every? #(= "lambeaux.paper-trail.testns.bob" (namespace %))
                         (is-not-empty
