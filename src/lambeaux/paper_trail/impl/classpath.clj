@@ -51,12 +51,18 @@
 (def path-os  (path-regex File/separator))
 (def path-jar (path-regex "/"))
 
+(defn artifact->path
+  [artifact]
+  (if (instance? JarFile artifact)
+    (.getName artifact)
+    (str artifact)))
+
 (defn path-filter
   "Input 'obj' can be anything where (str obj) returns a path string.
    Should work for java.io.File and java.util.jar.JarEntry (and probably others)."
   [path-regex pred]
   (fn [obj]
-    (pred (str/split (str obj) path-regex))))
+    (pred (str/split (artifact->path obj) path-regex))))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Classpath: Form Parsing
@@ -72,14 +78,20 @@
    :regex           true
    :var             true
    :auto-resolve-ns true
+   ;; note: for now, only JVM Clojure is supported, but this will evolve
+   :read-cond       :allow
+   :features        #{:clj}
    ;; todo: keeping around as a reminder, will remove after more testing
    #_#_:syntax-quote    true})
 
+(def ^:dynamic *enable-parse-all-forms* false)
+
 (defn resolve-symbol
-  [ns-override sym]
-  (assert (instance? Namespace ns-override) "ns-override must be a namespace")
-  (binding [*ns* ns-override]
-    (rdr/resolve-symbol sym)))
+  [ns-name* sym]
+  (let [ns-override (the-ns ns-name*)]
+    (assert (instance? Namespace ns-override) "ns-override must be a namespace")
+    (binding [*ns* ns-override]
+      (rdr/resolve-symbol sym))))
 
 (defn classpath-record
   [map-in]
@@ -88,8 +100,9 @@
 (defn location-info
   [artifact file-or-entry]
   {:path-to-ns (str file-or-entry)
-   :path-to-artifact (when artifact (str artifact))
+   :path-to-artifact (when artifact (artifact->path artifact))
    :file (when (is-file? file-or-entry) file-or-entry)
+   :jar-entry (when (is-jar-entry? file-or-entry) file-or-entry)
    :artifact artifact})
 
 (defn read-forms
@@ -99,24 +112,25 @@
    (with-open [rdr  (io/reader readable)
                rdr* (ed/reader rdr)]
      (let [ns-form (ed/parse-next rdr* (ed/normalize-opts *default-edamame-config*))
-           {ns-name* :current ns-aliases* :aliases} (ed/parse-ns-form ns-form)
+           {ns-id :current aliases :aliases} (ed/parse-ns-form ns-form)
            ;; todo: keeping around as a reminder, will remove after more testing
            #_#_opts (ed/normalize-opts *default-edamame-config*)
            opts (ed/normalize-opts
                  (assoc *default-edamame-config*
                         :syntax-quote
-                        {:resolve-symbol (partial resolve-symbol (the-ns ns-name*))}))
+                        {:resolve-symbol (partial resolve-symbol ns-id)}))
            location* (location-info artifact file-or-entry)]
        (classpath-record
         (merge
          location*
-         {:ns-name    ns-name*
-          :ns-aliases ns-aliases*
+         {:ns-id      ns-id
           :ns-form    ns-form
-          :forms      (->> (repeatedly (partial ed/parse-next rdr* opts))
-                           (take-while #(not= % :edamame.core/eof))
-                           (map #(vary-meta % assoc ::pt/location location*))
-                           (into []))}))))))
+          :alias-map  aliases
+          :forms      (when *enable-parse-all-forms*
+                        (->> (repeatedly (partial ed/parse-next rdr* opts))
+                             (take-while #(not= % :edamame.core/eof))
+                             (map #(vary-meta % assoc ::pt/location location*))
+                             (into [])))}))))))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Classpath: Source Loading
@@ -139,48 +153,49 @@
   [path-parts]
   (not= "META-INF" (first path-parts)))
 
+(def pred-file (path-filter path-os
+                            only-clojure-exts?))
+
+(def pred-jar  (path-filter path-jar
+                            (every-pred only-clojure-exts?
+                                        only-non-metainf?)))
+
 (defn read-raw-file
-  ([obj-in]
-   (read-raw-file nil obj-in))
-  ([_parent obj-in]
-   (assert (is-file? obj-in) "obj-in must be a file")
-   (read-forms obj-in obj-in)))
+  ([source-file]
+   (assert (is-file? source-file) "source-file must be a file")
+   (read-forms source-file source-file)))
 
 (defn read-raw-directory
-  ([obj-in]
-   (read-raw-directory nil obj-in))
-  ([_parent obj-in]
-   (assert (is-file? obj-in) "obj-in must be a file")
-   (assert (.isDirectory obj-in) "obj-in must be a directory")
-   (filter (path-filter path-os only-clojure-exts?)
-           (file-seq obj-in))))
+  ([directory-as-file]
+   (assert (is-file? directory-as-file) "directory-as-file must be a file")
+   (assert (.isDirectory directory-as-file) "directory-as-file must be a directory")
+   (filter pred-file (file-seq directory-as-file))))
 
 (defn read-jar-entry
-  ([obj-in]
-   (throw (UnsupportedOperationException.
-           (str "JarEntry requires the parent JarFile in order to perform a read: "
-                obj-in))))
-  ([parent-jar obj-in]
-   (assert (is-jar-file? parent-jar) "parent must be a jar file")
-   (assert (is-jar-entry? obj-in) "obj-in must be a jar entry")
-   (with-open [stream (.getInputStream parent-jar obj-in)]
-     (read-forms parent-jar obj-in stream))))
+  ([parent-file jar-entry]
+   (assert (is-file? parent-file) "parent-file must be a file")
+   (assert (is-jar-entry? jar-entry) "jar-entry must be a jar entry")
+   (with-open [entry-stream (.getInputStream (JarFile. parent-file) jar-entry)]
+     (read-forms parent-file jar-entry entry-stream))))
 
 (defn read-jar-archive
-  ([mapper-fn obj-in]
-   (assert (is-file? obj-in) "obj-in must be a file")
-   (with-open [jar-stream (new-jar-input-stream (io/input-stream obj-in))]
+  ([mapper-fn jar-file]
+   (assert (is-file? jar-file) "jar-file must be a file")
+   (with-open [jar-stream (new-jar-input-stream (io/input-stream jar-file))]
      (->> (repeatedly (fn [] (.getNextJarEntry jar-stream)))
           (take-while identity)
-          (filter (path-filter path-jar
-                               (every-pred only-clojure-exts?
-                                           only-non-metainf?)))
+          (filter pred-jar)
           (map mapper-fn)
           (into [])))))
 
 (defn read-jar-content
-  ([obj-in]
-   (read-jar-archive (partial read-jar-entry (JarFile. obj-in)) obj-in)))
+  ([jar-file]
+   (read-jar-archive (partial read-jar-entry jar-file) jar-file)))
+
+(defn read-jar-single-entry
+  [jar-artifact jar-entry]
+  (with-open [_jar-stream (new-jar-input-stream (io/input-stream jar-artifact))]
+    (read-jar-entry jar-artifact jar-entry)))
 
 ;; ------------------------------------------------------------------------------------------------
 
@@ -202,21 +217,6 @@
 ;; Classpath: Namespace Sequence
 ;; ------------------------------------------------------------------------------------------------
 
-(def default-seq-content-config
-  {:parse-content? true
-   :read-file      read-raw-file
-   :read-jar       read-jar-content
-   :read-directory read-raw-directory})
-
-(def default-seq-location-config
-  {:parse-content? false
-   :read-file      listing-for-file
-   :read-jar       listings-for-jar
-   :read-directory listings-for-directory})
-
-(def ^:dynamic *default-seq-config*
-  {:parse-content? false})
-
 (def is-classpath-record? #(::pt/classpath-record? (meta %)))
 (def is-directory?        #(when (is-file? %) (.isDirectory %)))
 (def is-source-file?      (path-filter path-os only-clojure-exts?))
@@ -225,6 +225,7 @@
 (defn classify-obj
   [obj]
   (cond
+    (nil? obj)                       :none
     (and (map? obj)
          (is-classpath-record? obj)) :record
     (and (is-file? obj)
@@ -235,52 +236,43 @@
          (is-artifact? obj))         :jar-archive
     :else                            :unsupported))
 
-(defn ns-seq*
-  ([[file & more :as _classpath-seq]
-    {:keys [read-file read-jar read-directory] :as opts}]
+(defn ns-seq
+  "Expands a classpath into a seq of maps that contain path info for all available namespaces
+   discovered on the classpath. By default, only reads and parses the namespace form in each 
+   discovered source file. Defaults to clojure.java.classpath's calculated classpath. Expects 
+   classpath-seq to be a seq of File objects."
+  ([]
+   (ns-seq (jc/classpath)))
+  ([[file & more :as _classpath-seq]]
    (let [file-type (classify-obj file)
-         lazy-rest (lazy-seq (ns-seq* more opts))]
+         lazy-rest (lazy-seq (ns-seq more))]
      ;; (println (format "Expanding [%s] %s" file-type (str file)))
      (case file-type
+       :none          nil
        :record        (cons file lazy-rest)
-       :raw-file      (cons (read-file file) lazy-rest)
-       :jar-archive   (concat (read-jar file) lazy-rest)
-       :raw-directory (lazy-seq (ns-seq* (concat (read-directory file) more)
-                                         opts))
+       :raw-file      (cons (read-raw-file file) lazy-rest)
+       :jar-archive   (concat (read-jar-content file) lazy-rest)
+       :raw-directory (lazy-seq (ns-seq (concat (read-raw-directory file) more)))
        :unsupported   (do (println
                            (format "Warning: Unexpected classpath object [%s] %s"
                                    (class file)
                                    (str file)))
                           lazy-rest)))))
 
-(defn ns-seq
-  ([classpath-seq]
-   (ns-seq classpath-seq *default-seq-config*))
-  ([classpath-seq {:keys [parse-content?] :as opts}]
-   (let [opts* (if parse-content?
-                 default-seq-content-config
-                 default-seq-location-config)]
-     ;; note: merge order ensures fn impls are consistent per opts
-     (ns-seq* classpath-seq (merge *default-seq-config* opts opts*)))))
+(defn ns-load
+  "Given a location info map, return an updated location info map with all forms in the namespace
+   fully loaded, populated on the :forms key."
+  [{:keys [artifact jar-entry file] :as _location-info}]
+  (binding [*enable-parse-all-forms* true]
+    (cond file (read-raw-file file)
+          (and artifact jar-entry) (read-jar-single-entry artifact jar-entry)
+          :else nil)))
 
-(defn ns-location-seq
-  "Expands a classpath into a seq of maps that contain path info for all available namespaces
-   discovered on the classpath. Does not read namespace content or parse forms. Defaults to 
-   clojure.java.classpath's calculated classpath. Expects classpath-seq to be a seq of File 
-   objects."
-  ([]
-   (ns-location-seq (jc/classpath)))
-  ([classpath-seq]
-   (ns-seq classpath-seq {:parse-content? false})))
-
-;; todo: add another seq fn for just discovering namespaces, but not actually parsing them
-;;   (useful for cheaply building a namespace index for lazy loading source 1 fn at a time)
-;; todo: add opts so you can filter out expensive tasks, like reading from jar files
-(defn ns-content-seq
-  "Expands a classpath into a seq of maps that contain all the forms in each
-   discovered namespace. Defaults to clojure.java.classpath's calculated classpath.
-   Expects classpath-seq to be a seq of File objects."
-  ([]
-   (ns-content-seq (jc/classpath)))
-  ([classpath-seq]
-   (ns-seq classpath-seq {:parse-content? true})))
+(defn ns-index
+  "Creates a map of the ns sym (the ns name, aka :ns-id) to the ns location info."
+  []
+  (->> (ns-seq)
+       (filter #(symbol? (:ns-id %)))
+       (map (fn [{:keys [ns-id] :as location}]
+              (vector ns-id {:ns-location (dissoc location :ns-form :alias-map)})))
+       (into {})))
