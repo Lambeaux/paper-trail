@@ -30,11 +30,13 @@
 
 (defmethod print-method StackBox
   [this writer]
-  (let [class-str (.getName (class (box-value this)))]
-    (.write writer (case (box-type this)
-                     :unrealized (str "#stack.unrealized[" class-str "]")
-                     :unhandled  (str "#stack.unhandled[" class-str "]")
-                     (str "#stack.val[" (box-value this) "]")))))
+  (if-let [box-val* (box-value this)]
+    (let [class-str (.getName (class box-val*))]
+      (.write writer (case (box-type this)
+                       :unrealized (str "#stack.unrealized[" class-str "]")
+                       :unhandled  (str "#stack.unhandled[" class-str "]")
+                       (str "#stack.val[" box-val* "]"))))
+    (.write writer "#stack.val[nil]")))
 
 (defn val->unrealized [v] (new-box :unrealized v))
 (defn val->unhandled [v] (new-box :unhandled v))

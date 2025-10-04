@@ -110,6 +110,8 @@
                            :fn-in-execute (execute all-cmds)
                            :fn-on-stack   (fn-stack-push exec-ctx all-cmds)))
                        (throw (ArityException. arg-count obj-name))))))
+        ;; todo: instead of (str the-fn) inject proper location metadata from source
+        ;;   the technique will vary depending if the fn is a var or local binding
         the-fn* (with-meta (partial the-fn (str the-fn))
                   {::pt/fn-impl true})]
     (model/default-update ctx [:call-stack (stack/push-val call-stack the-fn*)])))
@@ -201,6 +203,15 @@
                                            (stack/push-resolved-val call-stack)
                                            (stack/frame-pop call-stack))]))
 
+(defn process-invoke-def
+  "Interpreted defs do not have side effects."
+  [{:keys [call-stack] [{:keys [arg-count] :as _cmd} & _] :commands :as ctx}]
+  (let [[name-sym :as args] (stack/peek-frame call-stack)
+        def-result (find-var name-sym)]
+    (cond-> ctx
+      (> arg-count 1) (update :extracted-defs conj [name-sym (last args)])
+      true (model/default-update [:call-stack (stack/push-resolved-val call-stack def-result)]))))
+
 ;; ------------------------------------------------------------------------------------------------
 ;; Processors: Terminal Value Handlers
 ;; ------------------------------------------------------------------------------------------------
@@ -210,9 +221,11 @@
     [cmd & _] :commands
     :as ctx}]
   (let [scalar-form (:form cmd)
-        scalar-value (or (peek (get source-scope scalar-form))
-                         (peek (get impl-scope scalar-form))
-                         scalar-form)
+        scalar-value (if-not (:eval? cmd)
+                       scalar-form
+                       (or (peek (get source-scope scalar-form))
+                           (peek (get impl-scope scalar-form))
+                           scalar-form))
         scalar-value (case scalar-value
                        ::pt/nil nil
                        ::pt/false false
@@ -415,6 +428,7 @@
     :stack-pop-frame  process-stack-pop-frame
     :create-fn        process-create-fn
     :invoke-fn        process-invoke-fn
+    :invoke-def       process-invoke-def
     :invoke-throw     process-invoke-throw
     :invoke-do        process-invoke-do
     :scalar           process-scalar
@@ -441,23 +455,28 @@
 ;; Processors: Command Execution
 ;; ------------------------------------------------------------------------------------------------
 
+(def ^:dynamic *enable-verbose-logging* false)
+
+(defn debug-log
+  [msg]
+  (when *enable-verbose-logging*
+    (println msg)))
+
 ;; also consider wrapping exceptions we know should be thrown inside
 ;; ex-info's with attached metadata, then wrap the entire interpreter
 ;; process with something like wrap-uncaught-ex but forward any wrapped
 ;; exception accordingly since they don't count as 'interpreter errors'
 ;; (maybe make a deftype for internal interpreter errors/exceptions)
-(defn execute
-  ([commands]
-   (execute commands nil))
-  ([commands stop-idx]
-   (let [stop-early? (if (and (int? stop-idx)
+(defn execute-ctx
+  ([context]
+   (execute-ctx context nil))
+  ([context stop-idx]
+   (let [command-handlers (create-command-handlers)
+         stop-early? (if (and (int? stop-idx)
                               (or (zero? stop-idx) (pos-int? stop-idx)))
                        (partial <= stop-idx)
-                       (constantly false))
-         command-handlers (create-command-handlers)
-         commands* commands
-         ctx* (model/new-exec-ctx commands*)]
-     (loop [{:keys [cmd-counter fn-idx] :as ctx} ctx*]
+                       (constantly false))]
+     (loop [{:keys [cmd-counter fn-idx] :as ctx} context]
        (let [{:keys [commands] :as _fctx} (get-in ctx [:fn-stack fn-idx])
              ;; _ (println (pr-str (first command-history)))
              idx (inc @cmd-counter)
@@ -467,10 +486,34 @@
          (cond
            ;; todo: when you support drilling down into function calls, fix
            ;; this to pop fns off the fn-stack and only throw when none remain
-           (stop-early? idx) ctx
-           h                 (recur (h ctx))
-           (> fn-idx 0)      (recur (fn-stack-pop ctx))
-           :else             (fn-stack-pop ctx)))))))
+           ;; update: this should be done but leaving comment here until more tests
+           ;; are added
+           (stop-early? idx) (do (debug-log "Execute Pivot = Stop Early")
+                                 (assoc ctx :stop-early? true))
+           h                 (do (debug-log "Execute Pivot = Handler")
+                                 (recur (h ctx)))
+           (> fn-idx 0)      (do (debug-log "Execute Pivot = Pop Stack")
+                                 (recur (fn-stack-pop ctx)))
+           :else             (do (debug-log "Execute Pivot = Context")
+                                 ctx)))))))
+
+(defn execute-for-defs
+  ([commands]
+   (execute-for-defs commands nil))
+  ([commands stop-idx]
+   (let [{:keys [stop-early?] :as ctx} (execute-ctx (model/new-exec-ctx commands) stop-idx)]
+     (if stop-early?
+       ctx
+       (:extracted-defs ctx)))))
+
+(defn execute
+  ([commands]
+   (execute commands nil))
+  ([commands stop-idx]
+   (let [{:keys [stop-early?] :as ctx} (execute-ctx (model/new-exec-ctx commands) stop-idx)]
+     (if stop-early?
+       ctx
+       (fn-stack-pop ctx)))))
 
 #_(defn get-fctx
     [context]
@@ -494,7 +537,7 @@
           {:keys [enable-try-catch-support? throwing-ex is-throwing?]} final-ctx
           call-stack (:call-stack (get-fctx final-ctx))]
       (if (and enable-try-catch-support? is-throwing?)
-      ;; SEE ABOVE TODO ITEM
+        ;; SEE ABOVE TODO ITEM
         (throw throwing-ex)
         (stack-peek call-stack))
       seq*))

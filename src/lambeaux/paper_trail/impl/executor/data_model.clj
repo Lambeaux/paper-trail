@@ -29,14 +29,19 @@
    :state {}})
 
 (defn new-exec-ctx
-  [commands]
-  {:fn-idx 0
-   :cmd-counter (atom -1)
-   :fn-stack [(new-fn-ctx commands)]
-   :try-handlers (list)
-   :is-throwing? false
-   :is-finally? false
-   :throwing-ex nil})
+  ([]
+   (new-exec-ctx nil))
+  ([commands]
+   {:fn-idx 0
+    :cmd-counter (atom -1)
+    :fn-stack (if-not commands
+                []
+                [(new-fn-ctx commands)])
+    :try-handlers (list)
+    :is-throwing? false
+    :is-finally? false
+    :extracted-defs []
+    :throwing-ex nil}))
 
 (def allowed-fn-keys (into #{} (keys (new-fn-ctx nil))))
 (def allowed-exec-keys (into #{} (keys (new-exec-ctx nil))))

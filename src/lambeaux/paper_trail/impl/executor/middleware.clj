@@ -6,6 +6,15 @@
 ;; Processors: Middleware
 ;; ------------------------------------------------------------------------------------------------
 
+(def ^:dynamic *enable-verbose-logging* false)
+
+(defn wrap-verbose-logging
+  [handler]
+  (fn [{[{:keys [action] :as cmd}] :commands :as ctx}]
+    (when *enable-verbose-logging*
+      (println "Handling " action " for command: " (pr-str cmd)))
+    (handler ctx)))
+
 (def allowed-op-when-throwing?
   #{:stack-push-frame
     :stack-pop-frame
@@ -67,6 +76,7 @@
    (cond-> handler
      true           wrap-throwing
      wrap-infinite? wrap-check-not-infinite
+     true           wrap-verbose-logging
      true           wrap-convenience-mappings
      true           wrap-uncaught-ex)))
 

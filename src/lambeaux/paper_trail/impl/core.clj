@@ -53,31 +53,19 @@
 
 (defn evaluate
   ([form]
-   (evaluate form nil))
-  ([form args]
-   (let [cmds (if args
-                (ptg/create-commands form args)
-                (ptg/create-commands form))]
+   (let [cmds (ptg/create-commands form)]
      (pte/execute cmds))))
 
 (defn evaluate-to
   ([idx form]
-   (evaluate-to idx form nil))
-  ([idx form args]
-   (let [cmds (if args
-                (ptg/create-commands form args)
-                (ptg/create-commands form))]
+   (let [cmds (ptg/create-commands form)]
      (pte/execute cmds idx))))
 
 (defn evaluate-debug
   ([form]
-   (evaluate-debug form nil))
-  ([form args]
-   (evaluate-debug form args identity))
-  ([form args xform]
-   (let [cmds (if args
-                (ptg/create-commands form args)
-                (ptg/create-commands form))]
+   (evaluate-debug form identity))
+  ([form xform]
+   (let [cmds (ptg/create-commands form)]
      (->> cmds
           (pte/ctx-seq)
           (map (fn [{:keys [fn-idx throwing-ex is-throwing? is-finally?] :as ctx}]

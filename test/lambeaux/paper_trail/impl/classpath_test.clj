@@ -41,9 +41,10 @@
   (conf/load-ns-for-test!
    (str/join (System/lineSeparator)
              [test-script-peer test-script-local]))
-  (let [form-map (ptc/read-forms no-src-file
-                                 (conf/str->input-stream test-script-local))
-        {:keys [path-to-ns forms] ns-name* :ns-name} form-map]
+  (let [form-map (binding [ptc/*enable-parse-all-forms* true]
+                   (ptc/read-forms no-src-file
+                                   (conf/str->input-stream test-script-local)))
+        {:keys [path-to-ns forms] ns-name* :ns-id} form-map]
     (is (= no-src-file path-to-ns))
     (is (= 'lambeaux.paper-trail.testns.bob ns-name*))
     (is (= true (every? #(= "lambeaux.paper-trail.testns.bob" (namespace %))

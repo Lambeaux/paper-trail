@@ -81,6 +81,17 @@
     (with-implicit-do
       (mapcat form->commands (rest form)))))
 
+(defn handle-def
+  [{:keys [form->commands ns-sym] :as ctx} form]
+  (let [[name-sym & more-args :as args] (rest form)]
+    (with-form-wrappers [ctx 'def :special]
+      (with-stack-frame
+        (concat (action->commands :scalar
+                  :eval? false
+                  :form (symbol (name ns-sym) (name name-sym)))
+                (mapcat form->commands more-args)
+                (action->commands :invoke-def :arg-count (count args)))))))
+
 (defn handle-macro
   [{:keys [->commands] :as ctx} form]
   (let [form* (cons (first form)
@@ -377,6 +388,7 @@
    'do              (wrap-middleware handle-do)
    'fn              (wrap-middleware handle-fn)
    'fn*             (wrap-middleware handle-fn)
+   'def             (wrap-middleware handle-def)
    ;; 'clojure.core/fn (wrap-middleware handle-fn)
    'if              (wrap-middleware handle-if)
    'let             (wrap-middleware handle-let)
@@ -398,7 +410,7 @@
 (defn ->commands
   [context form]
   (if-not (coll? form)
-    (seq (action->commands :scalar :form form))
+    (seq (action->commands :scalar :form form :eval? true))
     (let [h (or (get form-handlers (first form))
                 (get form-handlers (ptu/classify form)))]
       (if h
@@ -417,19 +429,18 @@
    ;; NOTE: Could just use an Atom and the return val of swap! so this is cross-platform
    ;; compatible in other Clojure dialects
    #_#_:next-recur-idx (ptu/counter-fn)
+   :ns-sym nil
    :recur-idx 0
    :in-macro? false})
 
 (defn create-commands
   ([form]
-   (create-commands form nil))
-  ([form args]
-   (create-commands form args (ns-name *ns*)))
-  ([form args ns-sym]
-   (assert (or (nil? args) (vector? args)) "args must be a vector or nil")
-   (assert (symbol? ns-sym) "ns-sym must be a symbol")
-   (let [attrs (cond-> (new-generator-ctx)
-                 true (assoc :ns-sym ns-sym)
-                 true (assoc :enable-cmd-gen? (not (boolean args)))
-                 args (assoc :args args))]
-     (->commands attrs form))))
+   (create-commands nil form))
+  ([ns-sym form]
+   (when ns-sym
+     (assert (symbol? ns-sym) "ns-sym must be a symbol"))
+   (let [context (new-generator-ctx)
+         ns-sym* (if ns-sym
+                   ns-sym
+                   (ns-name *ns*))]
+     (->commands (assoc context :ns-sym ns-sym*) form))))
