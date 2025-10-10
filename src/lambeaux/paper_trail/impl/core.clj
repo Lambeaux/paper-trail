@@ -8,7 +8,9 @@
 (ns lambeaux.paper-trail.impl.core
   (:require [lambeaux.paper-trail.impl.generator :as ptg]
             [lambeaux.paper-trail.impl.executor :as pte]
-            [lambeaux.paper-trail.impl.util :as ptu])
+            [lambeaux.paper-trail.impl.util :as ptu]
+            [lambeaux.paper-trail.impl.classpath :as ptc]
+            [lambeaux.paper-trail.impl.executor.data-model :as model])
   (:import [clojure.lang IObj Compiler$CompilerException]))
 
 (def default-line-or-column 0)
@@ -33,9 +35,9 @@
    :compile-syntax-check
    (RuntimeException. (str "Unable to resolve symbol: " (name sym) " in this context"))))
 
-(defn trace-fn*
+(defn trace-original*
   ([src-ns symbol-str arg-seq]
-   (trace-fn* src-ns symbol-str {} arg-seq))
+   (trace-original* src-ns symbol-str {} arg-seq))
   ([src-ns symbol-str opts arg-seq]
    (if-let [fvar (resolve (symbol symbol-str))]
      (apply (deref fvar) arg-seq)
@@ -48,6 +50,41 @@
           ;;   improvements to conf/ex-comparable for testing).
           (ex-unresolvable-symbol *file* symbol-str)
           (ex-unresolvable-namespace *file* symbol-str)))))))
+
+(defonce ns-idx
+  (delay (atom (ptc/ns-index))))
+
+(defn ns-load*
+  [{:keys [ns-location] :as ns-cache}]
+  (when ns-cache
+    (let [{:keys [ns-id forms] :as location*} (ptc/ns-load ns-location)]
+      (assoc ns-cache
+             :ns-location location*
+             :ns-vars (->> forms
+                           (map (partial ptg/create-commands ns-id))
+                           (mapcat pte/execute-for-defs)
+                           (map (fn [[k v]]
+                                  (vector (last (ptu/sym-split k)) v)))
+                           (into {}))))))
+
+;; todo: resolve ns aliases in symbol str
+;; todo: only call ns-load* when the code has changed
+;; todo: add nrepl middleware for detecting when vars are redef'd in the repl separate from source
+(defn trace-fn*
+  ([src-ns symbol-str arg-seq]
+   (trace-fn* src-ns symbol-str {} arg-seq))
+  ([src-ns symbol-str _opts arg-seq]
+   (let [[sym-ns sym-name] (ptu/sym-split (symbol symbol-str))
+         ns-cache (ns-load* (get @(force ns-idx) sym-ns))
+         f (when ns-cache
+             (get-in ns-cache [:ns-vars sym-name]))]
+     (if-not (fn? f)
+       (throw (IllegalArgumentException. "f is not a fn"))
+       (as-> (model/new-exec-ctx) $
+         (model/new-call-ctx $)
+         (apply f $ arg-seq)
+         (pte/execute-ctx $)
+         (pte/fn-stack-pop $))))))
 
 ;; ----------------------------------------------------------------------------------------
 

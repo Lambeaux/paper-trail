@@ -122,6 +122,17 @@
                         the-val))]
       (- (* 2 (peek-pop!)) (peek-pop!)))))
 
+(comment
+  "Missed (fn) test cases"
+  ;; works
+  '(let [f (fn [x y]
+             (+ x y))]
+     (f 1 2))  
+  ;; fails, need to add support for variadic args
+  '(let [f (fn [x y & args]
+             (+ x y (reduce + args)))]
+     (f 1 2 3 4)))
+
 (deftest ^:core test-anonymous-functions
   #_(conf/forms->test "Test invoke (fn) directly"
       ((fn [] 100))

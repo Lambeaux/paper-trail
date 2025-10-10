@@ -32,7 +32,9 @@
   ([]
    (new-exec-ctx nil))
   ([commands]
-   {:fn-idx 0
+   {:fn-idx (if-not commands
+              -1
+              0)
     :cmd-counter (atom -1)
     :fn-stack (if-not commands
                 []
