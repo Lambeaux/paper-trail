@@ -27,7 +27,35 @@
 (deftest ^:minimal test-literals
   (conf/forms->test "Test data literals"
     (into [] (list 1 2 3))
-    (get {:a 1 :b 2} :a)))
+    (get {:a 1 :b 2} :a)
+    []
+    [1]
+    [1 2]
+    [1 2 3]
+    [(+ 1 2 3)]
+    [(+ 1 2 3) (+ 4 5 6)]
+    [(+ 1 2 3) (+ 4 5 6) (+ 7 8 9)]
+    {}
+    {:x 1}
+    {:x 1 :y 2}
+    {:x 1 :y 2 :z 3}
+    {(keyword "x") (+ 1 2 3)}
+    {(keyword "x") (+ 1 2 3) (keyword "y") (+ 4 5 6)}
+    {(keyword "x") (+ 1 2 3) (keyword "y") (+ 4 5 6) (keyword "z") (+ 7 8 9)}
+    #{}
+    #{1}
+    #{1 2}
+    #{1 2 3}
+    #{(+ 1 2 3)}
+    #{(+ 1 2 3) (+ 4 5 6)}
+    #{(+ 1 2 3) (+ 4 5 6) (+ 7 8 9)}
+    '()
+    '(1)
+    '(1 2)
+    '(1 2 3)
+    '(into [] (1 2 3))
+    (into [] '(1 2 3))
+    (into [] '(1 2 3 x y z))))
 
 (deftest ^:minimal test-do-return-vals
   (conf/forms->test "Test (do) return behavior"
@@ -127,7 +155,7 @@
   ;; works
   '(let [f (fn [x y]
              (+ x y))]
-     (f 1 2))  
+     (f 1 2))
   ;; fails, need to add support for variadic args
   '(let [f (fn [x y & args]
              (+ x y (reduce + args)))]

@@ -102,6 +102,26 @@
     (with-form-wrappers [ctx (first form) :macro]
       (->commands (assoc ctx :in-macro? true) (macroexpand form*)))))
 
+(defn handle-collection-literal
+  [type-kw {:keys [form->commands] :as ctx} form]
+  (with-form-wrappers [ctx type-kw :literal]
+    (with-stack-frame
+      (concat (mapcat form->commands
+                      (if-not (= type-kw :type/map)
+                        (seq form)
+                        (apply concat (seq form))))
+              (action->commands :invoke-fn
+                :op (case type-kw
+                      :type/map    'hash-map
+                      :type/set    'hash-set
+                      :type/vector 'vector)
+                :arg-count (count form))))))
+
+(defn handle-quote
+  [ctx [_quote-sym inner-form]]
+  (with-form-wrappers [ctx 'quote :special]
+    (action->commands :scalar :form inner-form :eval? false)))
+
 ;; ------------------------------------------------------------------------------------------------
 ;; Generators: Special Forms
 ;; ------------------------------------------------------------------------------------------------
@@ -379,13 +399,8 @@
 ;; Generators: Handler Mappings
 ;; ------------------------------------------------------------------------------------------------
 
-;; todo: need to add support for the following then update test cases:
-;; -- (quote) which needs to turn off evaluation
-;; -- literals like maps {}, vectors [], sets #{}, and quoted lists '()
 (def form-handlers
-  {;; todo: come back later and fix (def), don't need it yet for passing tests
-   ;; 'def             (wrap-middleware handle-def)
-   'do              (wrap-middleware handle-do)
+  {'do              (wrap-middleware handle-do)
    'fn              (wrap-middleware handle-fn)
    'fn*             (wrap-middleware handle-fn)
    'def             (wrap-middleware handle-def)
@@ -399,6 +414,10 @@
    'try             (wrap-middleware handle-try-catch-finally)
    'catch           (constantly nil)
    'finally         (constantly nil)
+   'quote           (wrap-middleware handle-quote)
+   :type/map        (wrap-middleware (partial handle-collection-literal :type/map))
+   :type/vector     (wrap-middleware (partial handle-collection-literal :type/vector))
+   :type/set        (wrap-middleware (partial handle-collection-literal :type/set))
    :type/macro      (wrap-middleware handle-macro)
    :type/list       (wrap-middleware handle-invoke)
    :type/cons       (wrap-middleware handle-invoke)})
