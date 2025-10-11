@@ -74,7 +74,7 @@
   ([src-ns symbol-str arg-seq]
    (trace-fn* src-ns symbol-str {} arg-seq))
   ([src-ns symbol-str _opts arg-seq]
-   (let [[sym-ns sym-name] (ptu/sym-split (symbol symbol-str))
+   (let [[sym-ns sym-name] (ptu/sym-split (ptu/ns-qualify-name src-ns (symbol symbol-str)))
          ns-cache (ns-load* (get @(force ns-idx) sym-ns))
          f (when ns-cache
              (get-in ns-cache [:ns-vars sym-name]))]
