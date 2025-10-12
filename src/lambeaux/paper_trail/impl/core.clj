@@ -61,7 +61,7 @@
       (assoc ns-cache
              :ns-location location*
              :ns-vars (->> forms
-                           (map (partial ptg/create-commands ns-id))
+                           (map (partial ptg/generate ns-id))
                            (mapcat pte/execute-for-defs)
                            (map (fn [[k v]]
                                   (vector (last (ptu/sym-split k)) v)))
@@ -91,19 +91,19 @@
 
 (defn evaluate
   ([form]
-   (let [cmds (ptg/create-commands form)]
+   (let [cmds (ptg/generate form)]
      (pte/execute cmds))))
 
 (defn evaluate-to
   ([idx form]
-   (let [cmds (ptg/create-commands form)]
+   (let [cmds (ptg/generate form)]
      (pte/execute cmds idx))))
 
 (defn evaluate-debug
   ([form]
    (evaluate-debug form identity))
   ([form xform]
-   (let [cmds (ptg/create-commands form)]
+   (let [cmds (ptg/generate form)]
      (->> cmds
           (pte/ctx-seq)
           (map (fn [{:keys [fn-idx throwing-ex is-throwing? is-finally?] :as ctx}]

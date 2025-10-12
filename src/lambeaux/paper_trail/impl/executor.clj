@@ -9,7 +9,6 @@
   (:require [lambeaux.paper-trail.impl.executor.call-stack :as stack]
             [lambeaux.paper-trail.impl.executor.data-model :as model]
             [lambeaux.paper-trail.impl.executor.middleware :as middleware]
-            [lambeaux.paper-trail.impl.generator :as ptg]
             [lambeaux.paper-trail.impl.util :as ptu :refer [assert*]]
             [lambeaux.paper-trail :as-alias pt])
   (:import [clojure.lang LazySeq ArityException]))
@@ -386,18 +385,6 @@
   [ctx]
   (let [f (:hook-fn (first (:commands ctx)))]
     (f ctx)))
-
-(comment
-  "Example use case for test hook: "
-  (let [f (fn [{:keys [fn-idx] :as ctx}]
-            (-> ctx
-                model/next-command
-                (assoc-in [:fn-stack fn-idx :is-throwing?] true)))
-        test-hook {:action :test-hook :hook-fn f}
-        cmds (ptg/create-commands '(+ 1 1))
-        cmds* (concat (butlast cmds)
-                      [test-hook (last cmds)])]
-    (execute cmds*)))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Processors: Handler Mappings

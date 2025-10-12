@@ -8,8 +8,10 @@
 (ns lambeaux.paper-trail.repl
   (:require [clojure.pprint :as pp]
             [lambeaux.paper-trail.impl.core :as impl]
+            [lambeaux.paper-trail.impl.executor.data-model :as model]
             [lambeaux.paper-trail.impl.executor.middleware :as middleware]
-            [lambeaux.paper-trail.impl.generator :as ptg]))
+            [lambeaux.paper-trail.impl.generator :as ptg]
+            [lambeaux.paper-trail.impl.executor :as pte]))
 
 (def default-thirdparty-requires
   ['[clojure.java.classpath :as jc]
@@ -129,10 +131,23 @@
                         (spit fname* content* :append true))))]
      (if-let [working-dir (System/getProperty "user.dir")]
        (spit-seq (str working-dir "/.tmp/" (name fname) ".edn")
-                 (ptg/create-commands form))
+                 (ptg/generate form))
        (throw (IllegalStateException. "No user.dir system property provided"))))))
 
-(comment
+(comment ;; Example test hook
+
+  "Example use case for test hook: "
+  (let [f (fn [{:keys [fn-idx] :as ctx}]
+            (-> ctx
+                model/next-command
+                (assoc-in [:fn-stack fn-idx :is-throwing?] true)))
+        test-hook {:action :test-hook :hook-fn f}
+        cmds (ptg/generate '(+ 1 1))
+        cmds* (concat (butlast cmds)
+                      [test-hook (last cmds)])]
+    (pte/execute cmds*)))
+
+(comment ;; Example try form
 
   (def my-try-form
     '(let [x (atom 1)]
@@ -144,7 +159,8 @@
 
   (impl/evaluate my-try-form))
 
-(comment
+(comment ;; Setting up Portal
+
   (require '[portal.api :as p])
   (def p (p/open {:launcher :vs-code}))
   (add-tap #'p/submit))

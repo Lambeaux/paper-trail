@@ -403,9 +403,9 @@
 (defn wrap-check-macro
   [handler]
   (fn [ctx form]
-    (let [ctx* (if (::pt/macro-arg (meta form))
-                 (assoc ctx :in-macro? false)
-                 ctx)]
+    (let [ctx* (if-not (::pt/macro-arg (meta form))
+                 ctx
+                 (assoc ctx :in-macro? false))]
       (handler ctx* form))))
 
 (defn wrap-form-depth
@@ -478,9 +478,9 @@
    :recur-idx 0
    :in-macro? false})
 
-(defn create-commands
+(defn generate
   ([form]
-   (create-commands nil form))
+   (generate nil form))
   ([ns-sym form]
    (when ns-sym
      (assert (symbol? ns-sym) "ns-sym must be a symbol"))
