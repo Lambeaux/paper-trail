@@ -8,9 +8,37 @@
 (ns lambeaux.paper-trail.impl.util
   (:require [clojure.string :as str]
             [clojure.set :as set]
-            [lambeaux.paper-trail.impl.lib :refer [assert*]]
             [lambeaux.paper-trail :as-alias pt])
   (:import [clojure.lang Cons Namespace]))
+
+;; ------------------------------------------------------------------------------------------------
+;; Lib
+;; ------------------------------------------------------------------------------------------------
+
+(def ^:dynamic *assert-gen* (boolean true))
+
+(defmacro assert*
+  "Like clojure.core/assert but throws RuntimeException instead of AssertionError.
+   This is useful when you want your assertions to be handled by your default error
+   handling / exception catching logic."
+  ([x]
+   (when *assert-gen*
+     `(when-not ~x
+        (throw (new RuntimeException (str "Assert failed: " (pr-str '~x)))))))
+  ([x message]
+   (when *assert-gen*
+     `(when-not ~x
+        (throw (new RuntimeException (str "Assert failed: " ~message "\n" (pr-str '~x))))))))
+
+#_(defn assoc-meta
+    "Like 'assoc' but operates on obj's metadata."
+    ([obj k v]
+     (vary-meta obj assoc k v))
+    ([obj k v k* v*]
+     (vary-meta obj assoc k v k* v*))
+    ([obj k v k* v* & kvs]
+     (let [f #(apply assoc (concat [% k v k* v*] kvs))]
+       (vary-meta obj f))))
 
 ;; TODO: make this invokable to increment, and derefable to read current state without change
 (defn counter-fn

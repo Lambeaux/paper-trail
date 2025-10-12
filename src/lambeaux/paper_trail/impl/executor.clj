@@ -10,8 +10,7 @@
             [lambeaux.paper-trail.impl.executor.data-model :as model]
             [lambeaux.paper-trail.impl.executor.middleware :as middleware]
             [lambeaux.paper-trail.impl.generator :as ptg]
-            [lambeaux.paper-trail.impl.util :as ptu]
-            [lambeaux.paper-trail.impl.lib :refer [assert*]]
+            [lambeaux.paper-trail.impl.util :as ptu :refer [assert*]]
             [lambeaux.paper-trail :as-alias pt])
   (:import [clojure.lang LazySeq ArityException]))
 

@@ -1,6 +1,5 @@
 (ns lambeaux.paper-trail.impl.executor.data-model
-  (:require [lambeaux.paper-trail.impl.util :as ptu]
-            [lambeaux.paper-trail.impl.lib :refer [assert*]]))
+  (:require [lambeaux.paper-trail.impl.util :as ptu :refer [assert*]]))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Data Model: Execution Context Builders
