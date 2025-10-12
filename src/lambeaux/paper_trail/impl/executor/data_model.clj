@@ -32,7 +32,12 @@
   ([]
    (new-exec-ctx nil))
   ([commands]
-   {:fn-idx (if-not commands
+   (new-exec-ctx nil commands))
+  ([ns-sym commands]
+   {:ns-sym (if ns-sym
+              ns-sym
+              (ns-name *ns*))
+    :fn-idx (if-not commands
               -1
               0)
     :cmd-counter (atom -1)

@@ -14,7 +14,7 @@
   [f & args]
   (assert (symbol? f)
           "f must be a symbol that resolves to a fn var or value")
-  (let [ns-local *ns*
+  (let [ns-local (ns-name *ns*)
         fn-symbol-str (pr-str f)]
     `(impl/trace-fn* ~ns-local ~fn-symbol-str *trace-opts* (list ~@args))))
 

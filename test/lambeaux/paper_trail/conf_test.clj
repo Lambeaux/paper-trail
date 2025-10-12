@@ -10,6 +10,8 @@
   (:require [clojure.test :as t :refer [deftest]]
             [lambeaux.paper-trail.conf-core :as conf]))
 
+(def some-local-var 1)
+
 (deftest ^:minimal test-core-fns
   (conf/forms->test "Test basic core functions"
     (+ 1 1)
@@ -66,6 +68,13 @@
     (do true)
     (do (+ 1 1))
     (do (+ 1 1) (+ 2 2))))
+
+(deftest ^:special test-var-special-form
+  ;; note: default ns is 'user
+  (binding [*ns* (the-ns 'lambeaux.paper-trail.conf-test)]
+    (conf/forms->test "Test (var) special form"
+      (var some-local-var)
+      (var conf/gather))))
 
 (deftest ^:special test-if-standalone
   (conf/forms->test "Test (if) on its own"
@@ -161,12 +170,7 @@
              (+ x y (reduce + args)))]
      (f 1 2 3 4)))
 
-(deftest ^:core test-anonymous-functions
-  #_(conf/forms->test "Test invoke (fn) directly"
-      ((fn [] 100))
-      ((fn [x] (+ 100 x)) 1)
-      ((fn [x y] (+ 100 x y)) 1 2)
-      ((fn [x y z] (+ 100 x y z)) 1 2 3))
+(deftest ^:core test-anonymous-function-bodies
   (conf/forms->test "Test (fn) inside lazy sequences"
     (map (fn [x] (inc x))
          (filter (fn [x] (odd? x))
@@ -187,3 +191,10 @@
     (mapv (fn [x] (mapv (fn [y] (inc y)) (get x :seq)))
           (mapv (fn [i] (hash-map :seq (into (vector) (range i))))
                 (range 1 6)))))
+
+(deftest ^:core test-anonymous-function-bodies-in-call-position
+  (conf/forms->test "Test invoke (fn) directly"
+    ((fn [] 100))
+    ((fn [x] (+ 100 x)) 1)
+    ((fn [x y] (+ 100 x y)) 1 2)
+    ((fn [x y z] (+ 100 x y z)) 1 2 3)))

@@ -55,25 +55,26 @@
 (defn with-form-wrappers
   "Wraps a seq of commands with the :begin-form and :end-form commands."
   [[{:keys [form-depth in-macro?] :as _ctx} operation* type*] command-seq]
-  (let [depth form-depth]
+  (let [depth form-depth
+        op* (when (symbol? operation*) operation*)]
     (concat (action->commands :begin-form
-              :form-depth depth :type type* :op operation* :in-macro? in-macro?)
+              :form-depth depth :type type* :op op* :in-macro? in-macro?)
             command-seq
             (action->commands :end-form
-              :form-depth depth :type type* :op operation* :in-macro? in-macro?))))
+              :form-depth depth :type type* :op op* :in-macro? in-macro?))))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Generators: 'Callable' Primitives (run/compile time)
 ;; ------------------------------------------------------------------------------------------------
 
 (defn handle-invoke
-  [{:keys [form->commands] :as ctx} form]
-  (let [args (rest form)]
-    (with-form-wrappers [ctx (first form) :fn]
-      (with-stack-frame
-        (concat (mapcat form->commands args)
-                (action->commands :invoke-fn
-                  :op (first form) :arg-count (count args)))))))
+  [{:keys [form->commands] :as ctx} [fn-sym & args :as form]]
+  (with-form-wrappers [ctx fn-sym :fn]
+    (with-stack-frame
+      (concat (mapcat form->commands (seq form))
+              (action->commands :invoke-fn
+                :op (when (symbol? fn-sym) fn-sym)
+                :arg-count (count args))))))
 
 (defn handle-do
   [{:keys [form->commands] :as ctx} form]
@@ -106,21 +107,45 @@
   [type-kw {:keys [form->commands] :as ctx} form]
   (with-form-wrappers [ctx type-kw :literal]
     (with-stack-frame
-      (concat (mapcat form->commands
-                      (if-not (= type-kw :type/map)
-                        (seq form)
-                        (apply concat (seq form))))
-              (action->commands :invoke-fn
-                :op (case type-kw
+      (let [coll-fn (case type-kw
                       :type/map    'hash-map
                       :type/set    'hash-set
-                      :type/vector 'vector)
-                :arg-count (count form))))))
+                      :type/vector 'vector)]
+        (concat (action->commands :scalar
+                  :form coll-fn
+                  :eval? true)
+                (mapcat form->commands
+                        (if-not (= type-kw :type/map)
+                          (seq form)
+                          (apply concat (seq form))))
+                (action->commands :invoke-fn
+                  :op coll-fn
+                  :arg-count (count form)))))))
 
 (defn handle-quote
   [ctx [_quote-sym inner-form]]
   (with-form-wrappers [ctx 'quote :special]
-    (action->commands :scalar :form inner-form :eval? false)))
+    (action->commands :scalar
+      :form inner-form
+      :eval? false)))
+
+(defn handle-var
+  [{:keys [ns-sym] :as ctx} [_var-sym inner-form]]
+  (assert (symbol? inner-form)
+          (str "var expects a symbol but got " (class inner-form)))
+  ;; (println "[...] Handle Var: ns-sym = " ns-sym " inner-form = " inner-form)
+  ;; (println "[...] Handle Var: ns-qualified = " (ptu/ns-qualify-name ns-sym inner-form))
+  (with-form-wrappers [ctx 'var :special]
+    (with-stack-frame
+      (concat (action->commands :scalar
+                :form 'find-var
+                :eval? true)
+              (action->commands :scalar
+                :form (ptu/ns-qualify-name ns-sym inner-form)
+                :eval? false)
+              (action->commands :invoke-fn
+                :op 'find-var
+                :arg-count 1)))))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Generators: Special Forms
@@ -414,6 +439,7 @@
    'try             (wrap-middleware handle-try-catch-finally)
    'catch           (constantly nil)
    'finally         (constantly nil)
+   'var             (wrap-middleware handle-var)
    'quote           (wrap-middleware handle-quote)
    :type/map        (wrap-middleware (partial handle-collection-literal :type/map))
    :type/vector     (wrap-middleware (partial handle-collection-literal :type/vector))

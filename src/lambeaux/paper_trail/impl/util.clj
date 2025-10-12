@@ -69,7 +69,7 @@
 (defn ns-qualify-name
   "Attempts to qualify a symbol sym based on src-ns.
    * If there's nothing operate on, return nil.
-   * If sym is not qualified, check if it's referred, else return unchanged.
+   * If sym is not qualified, check if it's referred, else qualify with src-ns.
    * If sym is qualified and the ns exists, return sym unchanged.
    * If sym is qualified by a non-existent namespace, check if it's aliased, else return unchanged."
   [src-ns sym]
@@ -79,12 +79,22 @@
       (not sym-ns)        (if-let [refer-ns (get (ns-refers-nocore src-ns) sym-name)]
                             (symbol (name (ns-name refer-ns))
                                     (name sym-name))
-                            sym)
+                            (symbol (name src-ns)
+                                    (name sym)))
       (ns-exists? sym-ns) sym
       :else               (if-let [alias-ns (get (ns-aliases src-ns) sym-ns)]
                             (symbol (name (ns-name alias-ns))
                                     (name sym-name))
                             sym))))
+
+(defn ns-resolve*
+  "Same as ns-resolve but returned vars are deref'd to get their values."
+  ;; note: maybe grab the var metadata while it's available and forward it onto the value
+  [ns-in sym]
+  (let [result (ns-resolve (the-ns ns-in) sym)]
+    (if-not (var? result)
+      result
+      (deref result))))
 
 (defn ns-resolve-name
   ([sym]
@@ -100,10 +110,10 @@
                (not (str/blank? ns-str))) "ns-str cannot be blank, if provided")
    (let [[sym-ns sym-name] (sym-split (symbol ns-str name-str))]
      (if sym-ns
-       (ns-resolve sym-ns sym-name)
-       (or (ns-resolve (the-ns src-ns) sym-name)
-           (lookup-fn sym-name)
-           (ns-resolve 'clojure.core sym-name))))))
+       (ns-resolve* sym-ns sym-name)
+       (or (lookup-fn sym-name)
+           (ns-resolve* src-ns sym-name)
+           (ns-resolve* 'clojure.core sym-name))))))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Predicates / Resolvers (OLD)

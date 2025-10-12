@@ -120,34 +120,22 @@
 ;; Processors: Function Handlers
 ;; ------------------------------------------------------------------------------------------------
 
-(def temp-ctx {::pt/current-ns *ns*})
-
-;; TODO clean up all this messy code that concerns
-;; symbol and namespace resolution
-(defn map-impl-fn [ctx]
-  (fn [arg]
-    (cond
-      ;; needed this check because lazy ex's were getting
-      ;; swallowed by accessible-fn? and ->impl
-      (instance? LazySeq arg) arg
-      (ptu/accessible-fn? ctx arg) (ptu/->impl ctx arg)
-      ;; note: temporary limitation: for now, fns passed as arguments must be invoked 
-      ;; as fn-in-execute and not as fn-on-stack, because return vals are expected, not
-      ;; returned context
-      (and (fn? arg) (::pt/fn-impl (meta arg))) (partial arg (model/new-call-ctx))
-      :else arg)))
+;; note: temporary limitation: for now, fns passed as arguments must be invoked 
+;; as fn-in-execute and not as fn-on-stack, because return vals are expected, not
+;; returned context
+;; note: do not do any prep on lazy seqs, setting their meta realizes them
+(defn prep-arg
+  [arg]
+  (cond
+    (instance? LazySeq arg) arg
+    (and (fn? arg) (::pt/fn-impl (meta arg))) (partial arg (model/new-call-ctx))
+    :else arg))
 
 (defn invoke-opaque-fn
-  [{:keys [throwing-ex is-throwing? is-finally? call-stack] :as ctx}
-   fn-impl]
+  [{:keys [throwing-ex is-throwing? is-finally? call-stack] :as context}
+   [f & args :as _fn-frame]]
   (let [[ex? result] (try
-                       (let [return (apply fn-impl
-                                           (map (map-impl-fn temp-ctx)
-                                                (stack/peek-frame call-stack)))]
-                         ;; [false (if-not (seq? return) return (doall return))]
-                         ;; Turns out, requiring doall here was a red herring. The real
-                         ;; failure was occurring down below when trying to with-meta a
-                         ;; lazy, unrealized seq. 
+                       (let [return (apply f (map prep-arg args))]
                          [false return])
                        ;; JVM Note: typical applications should not catch throwable
                        ;; if you copy this pattern, make sure you know what you're doing
@@ -159,7 +147,7 @@
                                        (::pt/raw-form (meta arg)))
                                   arg))
                             (stack-take arg-count call-stack))]
-    (-> ctx
+    (-> context
         (assoc
          :is-throwing? (boolean (or is-throwing? ex?))
          :is-finally? (if ex? false is-finally?)
@@ -170,22 +158,16 @@
                         (stack/push-resolved-val call-stack result))]))))
 
 (defn invoke-interpreted-fn
-  [{:keys [call-stack] :as ctx} fn-impl]
-  (apply fn-impl
-         (model/new-call-ctx ctx)
-         (map (map-impl-fn temp-ctx)
-              (stack/peek-frame call-stack))))
+  [context [f & args :as _fn-frame]]
+  (apply f (model/new-call-ctx context) (map prep-arg args)))
 
 (defn process-invoke-fn
-  [{:keys [source-scope impl-scope] [cmd & _] :commands :as ctx}]
-  (let [fn-symbol (:op cmd)
-        fn-impl   (or (peek (get source-scope fn-symbol))
-                      (peek (get impl-scope fn-symbol))
-                      (ptu/->impl temp-ctx fn-symbol))
-        pt-fn?    (boolean (::pt/fn-impl (meta fn-impl)))]
+  [{:keys [call-stack] :as ctx}]
+  (let [fn-frame (stack/peek-frame call-stack)
+        pt-fn? (boolean (::pt/fn-impl (meta (first fn-frame))))]
     (if pt-fn?
-      (invoke-interpreted-fn ctx fn-impl)
-      (invoke-opaque-fn ctx fn-impl))))
+      (invoke-interpreted-fn ctx fn-frame)
+      (invoke-opaque-fn ctx fn-frame))))
 
 (defn process-invoke-throw
   [{:keys [call-stack] :as ctx}]
@@ -216,16 +198,19 @@
 ;; Processors: Terminal Value Handlers
 ;; ------------------------------------------------------------------------------------------------
 
+(defn resolve-if-symbol
+  [{:keys [ns-sym source-scope impl-scope]
+    [{:keys [form eval?] :as _cmd} & _] :commands
+    :as _ctx}]
+  (if-not (and (symbol? form) eval?)
+    form
+    (let [local-lookup #(or (peek (get source-scope %))
+                            (peek (get impl-scope %)))]
+      (ptu/ns-resolve-name local-lookup ns-sym (namespace form) (name form)))))
+
 (defn process-scalar
-  [{:keys [call-stack source-scope impl-scope]
-    [cmd & _] :commands
-    :as ctx}]
-  (let [scalar-form (:form cmd)
-        scalar-value (if-not (:eval? cmd)
-                       scalar-form
-                       (or (peek (get source-scope scalar-form))
-                           (peek (get impl-scope scalar-form))
-                           scalar-form))
+  [{:keys [call-stack] :as ctx}]
+  (let [scalar-value (resolve-if-symbol ctx)
         scalar-value (case scalar-value
                        ::pt/nil nil
                        ::pt/false false

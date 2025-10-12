@@ -80,7 +80,8 @@
              (get-in ns-cache [:ns-vars sym-name]))]
      (if-not (fn? f)
        (throw (IllegalArgumentException. "f is not a fn"))
-       (as-> (model/new-exec-ctx) $
+       (as-> src-ns $
+         (model/new-exec-ctx $ nil)
          (model/new-call-ctx $)
          (apply f $ arg-seq)
          (pte/execute-ctx $)
