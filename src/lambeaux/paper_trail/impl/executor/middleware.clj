@@ -1,5 +1,6 @@
 (ns lambeaux.paper-trail.impl.executor.middleware
   (:require [lambeaux.paper-trail.impl.executor.data-model :as model]
+            [lambeaux.paper-trail.impl.executor.reporter :as reporter]
             [lambeaux.paper-trail.impl.util :as ptu]))
 
 ;; ------------------------------------------------------------------------------------------------
@@ -78,6 +79,7 @@
      wrap-infinite? wrap-check-not-infinite
      true           wrap-verbose-logging
      true           wrap-convenience-mappings
+     true           reporter/wrap-reporting
      true           wrap-uncaught-ex)))
 
 ;; (wrap-command-middleware false f)

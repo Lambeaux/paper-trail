@@ -10,13 +10,21 @@
 
 (def ^:dynamic *trace-opts* {})
 
-(defmacro trace-fn
+(defmacro fn-trace
   [f & args]
   (assert (symbol? f)
           "f must be a symbol that resolves to a fn var or value")
   (let [ns-local (ns-name *ns*)
         fn-symbol-str (pr-str f)]
-    `(impl/trace-fn* '~ns-local ~fn-symbol-str *trace-opts* (list ~@args))))
+    `(impl/fn-trace (impl/fn-load '~ns-local ~fn-symbol-str *trace-opts* (list ~@args)))))
+
+(defmacro fn-call
+  [f & args]
+  (assert (symbol? f)
+          "f must be a symbol that resolves to a fn var or value")
+  (let [ns-local (ns-name *ns*)
+        fn-symbol-str (pr-str f)]
+    `(impl/fn-call (impl/fn-load '~ns-local ~fn-symbol-str *trace-opts* (list ~@args)))))
 
 (defn evaluate
   "Like clojure.core/eval but uses the paper-trail interpreter to produce

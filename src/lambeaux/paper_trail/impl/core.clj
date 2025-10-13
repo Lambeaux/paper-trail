@@ -81,9 +81,9 @@
 ;; todo: resolve ns aliases in symbol str
 ;; todo: only call ns-load* when the code has changed
 ;; todo: add nrepl middleware for detecting when vars are redef'd in the repl separate from source
-(defn trace-fn*
+(defn fn-load
   ([src-ns symbol-str arg-seq]
-   (trace-fn* src-ns symbol-str {} arg-seq))
+   (fn-load src-ns symbol-str {} arg-seq))
   ([src-ns symbol-str _opts arg-seq]
    (let [[sym-ns sym-name] (ptu/sym-split (ptu/ns-qualify-name src-ns (symbol symbol-str)))
          ns-cache (ns-load* (get @(force ns-idx) sym-ns))
@@ -94,9 +94,20 @@
        (as-> src-ns $
          (model/new-exec-ctx $ nil)
          (assoc (model/new-call-ctx $) :fn-meta (meta f))
-         (apply f $ arg-seq)
-         (pte/execute-ctx $)
-         (pte/fn-stack-pop $))))))
+         (apply f $ arg-seq))))))
+
+(defn fn-call
+  [context]
+  (->> context
+       (pte/execute-ctx)
+       (pte/fn-stack-pop)))
+
+(defn fn-trace
+  [context]
+  (->> context
+       (pte/execute-ctx)
+       (:reports)
+       (mapv #(select-keys % [:form :result]))))
 
 ;; ----------------------------------------------------------------------------------------
 
