@@ -12,13 +12,16 @@
    (new-call-ctx :fn-on-stack exec-ctx))
   ([call-type exec-ctx]
    {:call-type call-type
+    :fn-meta nil
     :exec-ctx (when (= :fn-on-stack call-type)
                 (assert* (map? exec-ctx) "exec-ctx must be a map")
                 exec-ctx)}))
 
 (defn new-fn-ctx
-  [commands]
-  {:commands commands
+  [ns-caller commands]
+  {:ns-caller ns-caller
+   :fn-meta nil
+   :commands commands
    :command-history (list)
    :call-stack (list)
    :form-depth -1
@@ -33,23 +36,27 @@
   ([commands]
    (new-exec-ctx nil commands))
   ([ns-sym commands]
-   {:ns-sym (if ns-sym
-              ns-sym
-              (ns-name *ns*))
-    :fn-idx (if-not commands
-              -1
-              0)
-    :cmd-counter (atom -1)
-    :fn-stack (if-not commands
-                []
-                [(new-fn-ctx commands)])
-    :try-handlers (list)
-    :is-throwing? false
-    :is-finally? false
-    :extracted-defs []
-    :throwing-ex nil}))
+   (let [ns-caller (if ns-sym
+                     ns-sym
+                     (ns-name *ns*))
+         idx (if-not commands
+               -1
+               0)
+         stack (if-not commands
+                 []
+                 [(new-fn-ctx ns-caller commands)])]
+     {:ns-sym ns-caller
+      :extracted-defs []
+      :reports []
+      :cmd-counter (atom -1)
+      :fn-idx idx
+      :fn-stack stack
+      :try-handlers (list)
+      :is-throwing? false
+      :is-finally? false
+      :throwing-ex nil})))
 
-(def allowed-fn-keys (into #{} (keys (new-fn-ctx nil))))
+(def allowed-fn-keys (into #{} (keys (new-fn-ctx nil nil))))
 (def allowed-exec-keys (into #{} (keys (new-exec-ctx nil))))
 
 (ptu/disallow-overlap! allowed-exec-keys allowed-fn-keys)

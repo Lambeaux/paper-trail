@@ -16,7 +16,7 @@
           "f must be a symbol that resolves to a fn var or value")
   (let [ns-local (ns-name *ns*)
         fn-symbol-str (pr-str f)]
-    `(impl/trace-fn* ~ns-local ~fn-symbol-str *trace-opts* (list ~@args))))
+    `(impl/trace-fn* '~ns-local ~fn-symbol-str *trace-opts* (list ~@args))))
 
 (defn evaluate
   "Like clojure.core/eval but uses the paper-trail interpreter to produce

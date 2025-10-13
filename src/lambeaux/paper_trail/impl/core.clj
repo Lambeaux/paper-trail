@@ -10,7 +10,8 @@
             [lambeaux.paper-trail.impl.executor :as pte]
             [lambeaux.paper-trail.impl.util :as ptu]
             [lambeaux.paper-trail.impl.classpath :as ptc]
-            [lambeaux.paper-trail.impl.executor.data-model :as model])
+            [lambeaux.paper-trail.impl.executor.data-model :as model]
+            [lambeaux.paper-trail :as-alias pt])
   (:import [clojure.lang IObj Compiler$CompilerException]))
 
 (def default-line-or-column 0)
@@ -51,8 +52,12 @@
           (ex-unresolvable-symbol *file* symbol-str)
           (ex-unresolvable-namespace *file* symbol-str)))))))
 
-(defonce ns-idx
-  (delay (atom (ptc/ns-index))))
+(defn defmap->defpair
+  [{::pt/keys [var-id var-val] :as defmap}]
+  (let [local-name (last (ptu/sym-split var-id))]
+    (vector local-name (if-not (instance? IObj var-val)
+                         var-val
+                         (vary-meta var-val merge (dissoc defmap ::pt/var-val))))))
 
 (defn ns-load*
   [{:keys [ns-location] :as ns-cache}]
@@ -61,11 +66,17 @@
       (assoc ns-cache
              :ns-location location*
              :ns-vars (->> forms
-                           (map (partial ptg/generate ns-id))
-                           (mapcat pte/execute-for-defs)
-                           (map (fn [[k v]]
-                                  (vector (last (ptu/sym-split k)) v)))
+                           (map #(hash-map ::pt/src-form % ::pt/src-meta (meta %)))
+                           (mapcat (fn [{::pt/keys [src-form] :as %}]
+                                     (->> (ptg/generate ns-id src-form)
+                                          (pte/execute-for-defs)
+                                          (mapv (fn [[k v]]
+                                                  (assoc % ::pt/var-id k ::pt/var-val v))))))
+                           (map defmap->defpair)
                            (into {}))))))
+
+(defonce ns-idx
+  (delay (atom (ptc/ns-index))))
 
 ;; todo: resolve ns aliases in symbol str
 ;; todo: only call ns-load* when the code has changed
@@ -82,7 +93,7 @@
        (throw (IllegalArgumentException. "f is not a fn"))
        (as-> src-ns $
          (model/new-exec-ctx $ nil)
-         (model/new-call-ctx $)
+         (assoc (model/new-call-ctx $) :fn-meta (meta f))
          (apply f $ arg-seq)
          (pte/execute-ctx $)
          (pte/fn-stack-pop $))))))

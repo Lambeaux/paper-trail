@@ -37,10 +37,14 @@
 
 ;; Note: probably don't need the middleware for a push, only exec-ctx fields are relevant
 (defn fn-stack-push
-  [ctx commands]
-  (-> ctx
-      (update :fn-idx inc)
-      (update :fn-stack #(conj % (model/new-fn-ctx commands)))))
+  [{:keys [ns-sym fn-idx] :as ctx} fn-meta commands]
+  (let [{:keys [ns-caller]} (when (>= fn-idx 0)
+                              (get-in ctx [:fn-stack fn-idx]))
+        ns-caller* (or ns-caller ns-sym)]
+    (-> ctx
+        (update :fn-idx inc)
+        (update :fn-stack #(conj % (-> (model/new-fn-ctx ns-caller* commands)
+                                       (assoc :fn-meta fn-meta)))))))
 
 (defn fn-stack-do-pop*
   [{:keys [fn-idx] :as ctx}]
@@ -98,7 +102,7 @@
   (let [the-fn (let [scope-cmds (concat
                                  (copy-scope-cmds source-scope)
                                  (copy-scope-cmds true impl-scope))]
-                 (fn [obj-name {:keys [call-type exec-ctx]} & args]
+                 (fn [obj-name {:keys [call-type exec-ctx fn-meta]} & args]
                    (let [arg-count (count args)
                          ks (map #(str "arg-" %) (range arg-count))
                          kvs (into {} (map vector ks args))]
@@ -106,11 +110,11 @@
                        (let [all-cmds (concat [{:action :assoc-state :kvs kvs}] scope-cmds commands)]
                          (case call-type
                            :fn-in-execute (execute all-cmds)
-                           :fn-on-stack   (fn-stack-push exec-ctx all-cmds)))
+                           :fn-on-stack   (fn-stack-push exec-ctx fn-meta all-cmds)))
                        (throw (ArityException. arg-count obj-name))))))
         ;; todo: instead of (str the-fn) inject proper location metadata from source
         ;;   the technique will vary depending if the fn is a var or local binding
-        the-fn* (with-meta (partial the-fn (str the-fn))
+        the-fn* (with-meta (partial the-fn (pr-str the-fn))
                   {::pt/fn-impl true})]
     (model/default-update ctx [:call-stack (stack/push-val call-stack the-fn*)])))
 
@@ -157,7 +161,10 @@
 
 (defn invoke-interpreted-fn
   [context [f & args :as _fn-frame]]
-  (apply f (model/new-call-ctx context) (map prep-arg args)))
+  (apply f
+         (-> (model/new-call-ctx context)
+             (assoc :fn-meta (meta f)))
+         (map prep-arg args)))
 
 (defn process-invoke-fn
   [{:keys [call-stack] :as ctx}]
@@ -196,6 +203,7 @@
 ;; Processors: Terminal Value Handlers
 ;; ------------------------------------------------------------------------------------------------
 
+;; todo: update symbol resolution to pull from pt's ns-index if deep trace is desired
 (defn resolve-if-symbol
   [{:keys [ns-sym source-scope impl-scope]
     [{:keys [form eval?] :as _cmd} & _] :commands

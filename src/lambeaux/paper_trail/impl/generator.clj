@@ -54,14 +54,22 @@
 
 (defn with-form-wrappers
   "Wraps a seq of commands with the :begin-form and :end-form commands."
-  [[{:keys [form-depth in-macro?] :as _ctx} operation* type*] command-seq]
+  [[{:keys [form-depth form-meta in-macro?] :as _ctx} operation* type*] command-seq]
   (let [depth form-depth
         op* (when (symbol? operation*) operation*)]
     (concat (action->commands :begin-form
-              :form-depth depth :type type* :op op* :in-macro? in-macro?)
+              :op op*
+              :type type*
+              :form-meta form-meta
+              :form-depth depth
+              :in-macro? in-macro?)
             command-seq
             (action->commands :end-form
-              :form-depth depth :type type* :op op* :in-macro? in-macro?))))
+              :op op*
+              :type type*
+              :form-meta form-meta
+              :form-depth depth
+              :in-macro? in-macro?))))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Generators: 'Callable' Primitives (run/compile time)
@@ -400,6 +408,14 @@
     (handler (assoc ctx :form->commands (partial ->commands ctx))
              form)))
 
+(defn wrap-form-details
+  [handler]
+  (fn [ctx form]
+    (-> ctx
+        (assoc :form-meta (meta form))
+        (update :form-depth inc)
+        (handler form))))
+
 (defn wrap-check-macro
   [handler]
   (fn [ctx form]
@@ -408,16 +424,11 @@
                  (assoc ctx :in-macro? false))]
       (handler ctx* form))))
 
-(defn wrap-form-depth
-  [handler]
-  (fn [ctx form]
-    (handler (update ctx :form-depth inc) form)))
-
 (defn wrap-middleware
   [handler]
   (-> handler
       wrap-form-to-commands
-      wrap-form-depth
+      wrap-form-details
       wrap-check-macro))
 
 ;; ------------------------------------------------------------------------------------------------
@@ -469,6 +480,7 @@
    :form->commands nil
    :argdef-stack (list)
    :form-depth -1
+   :form-meta nil
    ;; TODO: replace recur-idx with an AtomicInteger since it is not consistently
    ;; being incremented everywhere
    ;; NOTE: Could just use an Atom and the return val of swap! so this is cross-platform
