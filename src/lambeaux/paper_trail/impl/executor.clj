@@ -122,10 +122,9 @@
 ;; Processors: Function Handlers
 ;; ------------------------------------------------------------------------------------------------
 
-;; note: temporary limitation: for now, fns passed as arguments must be invoked 
-;; as fn-in-execute and not as fn-on-stack, because return vals are expected, not
-;; returned context
 ;; note: do not do any prep on lazy seqs, setting their meta realizes them
+;; note: temporary limitation: for now, fns passed as arguments must be invoked as fn-in-execute 
+;;   and not as fn-on-stack, because return vals are expected, not returned context
 (defn prep-arg
   [arg]
   (cond
@@ -189,6 +188,15 @@
   (model/default-update ctx [:call-stack (if convey-result?
                                            (stack/push-resolved-val call-stack)
                                            (stack/frame-pop call-stack))]))
+
+;; todo: this is a stopgap to get a release out the door; as we iterate on the interpreter, this
+;;   should go away entirely
+(defn process-invoke-eval
+  [operator {:keys [ns-sym ns-caller call-stack] :as ctx}]
+  (let [ns-caller* (the-ns (or ns-caller ns-sym))
+        form (apply list operator (stack/peek-frame call-stack))
+        result (binding [*ns* ns-caller*] (eval form))]
+    (model/default-update ctx [:call-stack (stack/push-resolved-val call-stack result)])))
 
 (defn process-invoke-def
   "Interpreted defs do not have side effects."
@@ -405,6 +413,8 @@
     :end-form         process-end-form
     :stack-push-frame process-stack-push-frame
     :stack-pop-frame  process-stack-pop-frame
+    :invoke-new       (partial process-invoke-eval 'new)
+    :invoke-dot       (partial process-invoke-eval '.)
     :create-fn        process-create-fn
     :invoke-fn        process-invoke-fn
     :invoke-def       process-invoke-def

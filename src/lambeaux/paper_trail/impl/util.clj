@@ -204,6 +204,7 @@
 
 ;; ------------------------------------------------------------------------------------------------
 
+;; todo: replace this with the proper ns binding we do elsewhere
 (def temp-ctx {::pt/current-ns *ns*})
 
 (comment ;; Some ideas for the form hierarchy, but not necessary right now
@@ -245,7 +246,11 @@
   "Returns the macro type when invokable form x is a macro, else nil."
   [x]
   (let [op (first x)]
-    (when (accessible-macro? temp-ctx op)
+    (when (or (accessible-macro? temp-ctx op)
+              ;; note: might move this later, but for now, this will handle .call and call. interop
+              (and (simple-symbol? op) 
+                   (or (str/starts-with? (name op) ".")
+                       (str/ends-with? (name op) "."))))
       :type/macro)))
 
 ;; - Use symbols to represent literals in a dispatch map ('let, 'try, etc)

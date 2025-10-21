@@ -75,14 +75,52 @@
 ;; Generators: 'Callable' Primitives (run/compile time)
 ;; ------------------------------------------------------------------------------------------------
 
+(defn handle-new
+  [{:keys [form->commands] :as ctx} [_ & args :as _form]]
+  (with-form-wrappers [ctx 'new :special]
+    (with-stack-frame
+      (concat (mapcat form->commands (seq args))
+              (action->commands :invoke-new
+                :arg-count (count args))))))
+
+(defn handle-dot
+  [{:keys [form->commands] :as ctx} [_ & args :as _form]]
+  (with-form-wrappers [ctx '. :special]
+    (with-stack-frame
+      (concat (mapcat form->commands (seq args))
+              (action->commands :invoke-dot
+                :arg-count (count args))))))
+
+(defn handle-interop-symbol
+  [ctx form]
+  (if (and (qualified-symbol? form)
+           (Character/isUpperCase (first (namespace form))))
+    ;; note: cheeky interop shortcut so I can get a release out the door for feedback ASAP
+    ;;   probably not sustainable long term, but DM me if you find this and either had a laugh
+    ;;   or were sorely disappointed
+    (let [[ns-sym name-sym] (ptu/sym-split form)]
+      (handle-dot ctx (with-meta (list '. ns-sym name-sym)
+                        (meta form))))
+    ;; note: path for normal symbols
+    (action->commands :scalar :form form :eval? true)))
+
 (defn handle-invoke
   [{:keys [form->commands] :as ctx} [fn-sym & args :as form]]
-  (with-form-wrappers [ctx fn-sym :fn]
-    (with-stack-frame
-      (concat (mapcat form->commands (seq form))
-              (action->commands :invoke-fn
-                :op (when (symbol? fn-sym) fn-sym)
-                :arg-count (count args))))))
+  (if (and (qualified-symbol? fn-sym)
+           (Character/isUpperCase (first (namespace fn-sym))))
+    ;; note: cheeky interop shortcut so I can get a release out the door for feedback ASAP
+    ;;   probably not sustainable long term, but DM me if you find this and either had a laugh
+    ;;   or were sorely disappointed
+    (let [[ns-sym name-sym] (ptu/sym-split fn-sym)]
+      (handle-dot ctx (with-meta (apply list (concat ['. ns-sym name-sym] args))
+                        (meta form))))
+    ;; note: path for normal function invocation
+    (with-form-wrappers [ctx fn-sym :fn]
+      (with-stack-frame
+        (concat (mapcat form->commands (seq form))
+                (action->commands :invoke-fn
+                  :op (when (symbol? fn-sym) fn-sym)
+                  :arg-count (count args)))))))
 
 (defn handle-do
   [{:keys [form->commands] :as ctx} form]
@@ -436,28 +474,31 @@
 ;; ------------------------------------------------------------------------------------------------
 
 (def form-handlers
-  {'do              (wrap-middleware handle-do)
-   'fn              (wrap-middleware handle-fn)
-   'fn*             (wrap-middleware handle-fn)
-   'def             (wrap-middleware handle-def)
+  {'.                (wrap-middleware handle-dot)
+   'new              (wrap-middleware handle-new)
+   'do               (wrap-middleware handle-do)
+   'fn               (wrap-middleware handle-fn)
+   'fn*              (wrap-middleware handle-fn)
+   'def              (wrap-middleware handle-def)
    ;; 'clojure.core/fn (wrap-middleware handle-fn)
-   'if              (wrap-middleware handle-if)
-   'let             (wrap-middleware handle-let)
-   'let*            (wrap-middleware handle-let)
-   'loop            (wrap-middleware handle-loop)
-   'recur           (wrap-middleware handle-recur)
-   'throw           (wrap-middleware handle-throw)
-   'try             (wrap-middleware handle-try-catch-finally)
-   'catch           (constantly nil)
-   'finally         (constantly nil)
-   'var             (wrap-middleware handle-var)
-   'quote           (wrap-middleware handle-quote)
-   :type/map        (wrap-middleware (partial handle-collection-literal :type/map))
-   :type/vector     (wrap-middleware (partial handle-collection-literal :type/vector))
-   :type/set        (wrap-middleware (partial handle-collection-literal :type/set))
-   :type/macro      (wrap-middleware handle-macro)
-   :type/list       (wrap-middleware handle-invoke)
-   :type/cons       (wrap-middleware handle-invoke)})
+   'if               (wrap-middleware handle-if)
+   'let              (wrap-middleware handle-let)
+   'let*             (wrap-middleware handle-let)
+   'loop             (wrap-middleware handle-loop)
+   'recur            (wrap-middleware handle-recur)
+   'throw            (wrap-middleware handle-throw)
+   'try              (wrap-middleware handle-try-catch-finally)
+   'catch            (constantly nil)
+   'finally          (constantly nil)
+   'var              (wrap-middleware handle-var)
+   'quote            (wrap-middleware handle-quote)
+   :type/symbol-qual (wrap-middleware handle-interop-symbol)
+   :type/map         (wrap-middleware (partial handle-collection-literal :type/map))
+   :type/vector      (wrap-middleware (partial handle-collection-literal :type/vector))
+   :type/set         (wrap-middleware (partial handle-collection-literal :type/set))
+   :type/macro       (wrap-middleware handle-macro)
+   :type/list        (wrap-middleware handle-invoke)
+   :type/cons        (wrap-middleware handle-invoke)})
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Generators: Form Conversion -> Commands
@@ -466,7 +507,9 @@
 (defn ->commands
   [context form]
   (if-not (coll? form)
-    (seq (action->commands :scalar :form form :eval? true))
+    (if-let [h (get form-handlers (ptu/classify form))]
+      (lazy-seq (h context form))
+      (seq (action->commands :scalar :form form :eval? true)))
     (let [h (or (get form-handlers (first form))
                 (get form-handlers (ptu/classify form)))]
       (if h
