@@ -11,7 +11,7 @@
             [lambeaux.paper-trail.impl.executor.middleware :as middleware]
             [lambeaux.paper-trail.impl.util :as ptu :refer [assert*]]
             [lambeaux.paper-trail :as-alias pt])
-  (:import [clojure.lang LazySeq ArityException]))
+  (:import [clojure.lang IObj LazySeq ArityException]))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Processors: Call Stack
@@ -122,56 +122,94 @@
 ;; Processors: Function Handlers
 ;; ------------------------------------------------------------------------------------------------
 
+(defn raw-form
+  [form]
+  (or (::pt/raw-form (meta form)) form))
+
+(defn form->str
+  "Convert form data into a safe-to-print string without accidentally realizing any lazy seqs
+   or triggering other side effects."
+  [form]
+  (let [wrapped-vals (map #(if-not (and (instance? LazySeq %)
+                                        (not (realized? %)))
+                             %
+                             (stack/val->unrealized %))
+                          form)]
+    (pr-str (apply list wrapped-vals))))
+
+(defn invoke-form
+  "Given an execution `context`, an input `form`, and a `form-fn`, execute the form and update
+   the interpreter's execution state, handling errors appropriately. Execution typically means, 
+   but is not limited to, function calls or form evaluation. The `form-fn` is a zero argument fn
+   that will be called; its return value will resolve the invocation. The `form` arg is the raw 
+   form as data (not text), and in most cases it should hold true that `(= (eval form) (form-fn))`.
+   
+   Important note regarding the JVM. Typical applications should not `catch Throwable`. Doing so
+   means your code may try to recover from inherently unrecoverable errors. If you copy this pattern,
+   make sure you know what you're doing."
+  [context form form-fn]
+  ;; note: the form->str call is ESSENTIAL, otherwise printing triggers early realization of lazy
+  ;;   seqs, which does not match Clojure's behavior.
+  (println "Invoke form: " (form->str form))
+  (let [[ex? result] (try
+                       (vector false (form-fn))
+                       ;; todo: eventually support Throwable for more accurate results
+                       (catch Exception e (vector true e)))
+        {:keys [throwing-ex throwing-form is-throwing? is-finally? call-stack]} context]
+    (-> context
+        (assoc :is-throwing?  (boolean (or is-throwing? ex?))
+               :is-finally?   (if ex? false  is-finally?)
+               :throwing-ex   (if ex? result throwing-ex)
+               :throwing-form (if ex? form   throwing-form))
+        (model/default-update [:call-stack (if ex?
+                                             call-stack
+                                             (stack/push-resolved-val call-stack result))]))))
+
 ;; note: do not do any prep on lazy seqs, setting their meta realizes them
 ;; note: temporary limitation: for now, fns passed as arguments must be invoked as fn-in-execute 
 ;;   and not as fn-on-stack, because return vals are expected, not returned context
-(defn prep-arg
+(defn preprocess-arg
   [arg]
   (cond
+    ;; note: can simplify this, we only care about fn args for now, nothing else
     (instance? LazySeq arg) arg
     (and (fn? arg) (::pt/fn-impl (meta arg))) (partial arg (model/new-call-ctx))
     :else arg))
 
 (defn invoke-opaque-fn
-  [{:keys [throwing-ex is-throwing? is-finally? call-stack] :as context}
-   [f & args :as _fn-frame]]
-  (let [[ex? result] (try
-                       (let [return (apply f (map prep-arg args))]
-                         [false return])
-                       ;; JVM Note: typical applications should not catch throwable
-                       ;; if you copy this pattern, make sure you know what you're doing
-                       ;; (catch Throwable t [true t])
-                       ;; TODO: eventually support Throwable for more accurate results
-                       (catch Exception e [true e]))
-        #_#_final-form (map (fn [arg]
-                              (or (and (instance? IObj arg)
-                                       (::pt/raw-form (meta arg)))
-                                  arg))
-                            (stack-take arg-count call-stack))]
-    (-> context
-        (assoc
-         :is-throwing? (boolean (or is-throwing? ex?))
-         :is-finally? (if ex? false is-finally?)
-         :throwing-ex (if ex? result throwing-ex))
-        (model/default-update
-         [:call-stack (if ex?
-                        call-stack
-                        (stack/push-resolved-val call-stack result))]))))
+  "Handle invoking a fn that we will NOT recursively interpret, just call for a return val."
+  [context [f & args :as _fn-frame]]
+  (let [raw-form* (apply list (raw-form f) (map raw-form args))
+        form-fn   (fn []
+                    (apply f (map preprocess-arg args)))]
+    (invoke-form context raw-form* form-fn)))
 
 (defn invoke-interpreted-fn
+  "Handle invoking a fn that we will recursively interpret."
   [context [f & args :as _fn-frame]]
   (apply f
          (-> (model/new-call-ctx context)
              (assoc :fn-meta (meta f)))
-         (map prep-arg args)))
+         (map preprocess-arg args)))
 
 (defn process-invoke-fn
+  "General handling for any fn."
   [{:keys [call-stack] :as ctx}]
   (let [fn-frame (stack/peek-frame call-stack)
         pt-fn? (boolean (::pt/fn-impl (meta (first fn-frame))))]
     (if pt-fn?
       (invoke-interpreted-fn ctx fn-frame)
       (invoke-opaque-fn ctx fn-frame))))
+
+;; todo: this is a stopgap to get a release out the door; as we iterate on the interpreter, this
+;;   should go away entirely
+(defn process-invoke-eval
+  [{:keys [ns-sym ns-caller call-stack] [{:keys [op] :as _cmd} & _] :commands :as ctx}]
+  (let [raw-form* (apply list op (stack/peek-frame call-stack))
+        form-fn   (fn []
+                    (binding [*ns* (the-ns (or ns-caller ns-sym))]
+                      (eval raw-form*)))]
+    (invoke-form ctx raw-form* form-fn)))
 
 (defn process-invoke-throw
   [{:keys [call-stack] :as ctx}]
@@ -189,15 +227,6 @@
                                            (stack/push-resolved-val call-stack)
                                            (stack/frame-pop call-stack))]))
 
-;; todo: this is a stopgap to get a release out the door; as we iterate on the interpreter, this
-;;   should go away entirely
-(defn process-invoke-eval
-  [operator {:keys [ns-sym ns-caller call-stack] :as ctx}]
-  (let [ns-caller* (the-ns (or ns-caller ns-sym))
-        form (apply list operator (stack/peek-frame call-stack))
-        result (binding [*ns* ns-caller*] (eval form))]
-    (model/default-update ctx [:call-stack (stack/push-resolved-val call-stack result)])))
-
 (defn process-invoke-def
   "Interpreted defs do not have side effects."
   [{:keys [call-stack] [{:keys [arg-count] :as _cmd} & _] :commands :as ctx}]
@@ -211,6 +240,33 @@
 ;; Processors: Terminal Value Handlers
 ;; ------------------------------------------------------------------------------------------------
 
+(defn wrapped-delegate
+  "Refer to the following snippet for why this exists:
+   ```
+   clj꞉user꞉> (vary-meta list assoc :original-symbol 'list)
+   ; Execution error (UnsupportedOperationException) at user/eval53338 (REPL:1135).
+   ; null
+   ```
+   Seems like an edge case concerning `list` specifically, but not an issue for the other colls
+   (e.g. `vector`, `hash-map`, `hash-set`, etc).
+   ```
+   clj꞉user꞉> (class list)
+   clojure.lang.PersistentList$Primordial
+   ```"
+  [f]
+  (with-meta (fn [& args]
+               (apply f args))
+    (meta f)))
+
+(defn preserve-sym
+  [resolved form-sym]
+  (if-not (instance? IObj resolved)
+    resolved
+    (let [resolved* (if-not (fn? resolved)
+                      resolved
+                      (wrapped-delegate resolved))]
+      (vary-meta resolved* assoc ::pt/raw-form form-sym))))
+
 ;; todo: update symbol resolution to pull from pt's ns-index if deep trace is desired
 (defn resolve-if-symbol
   [{:keys [ns-sym source-scope impl-scope]
@@ -220,7 +276,9 @@
     form
     (let [local-lookup #(or (peek (get source-scope %))
                             (peek (get impl-scope %)))]
-      (ptu/ns-resolve-name local-lookup ns-sym (namespace form) (name form)))))
+      (-> local-lookup
+          (ptu/ns-resolve-name ns-sym (namespace form) (name form))
+          (preserve-sym form)))))
 
 (defn process-scalar
   [{:keys [call-stack] :as ctx}]
@@ -413,13 +471,12 @@
     :end-form         process-end-form
     :stack-push-frame process-stack-push-frame
     :stack-pop-frame  process-stack-pop-frame
-    :invoke-new       (partial process-invoke-eval 'new)
-    :invoke-dot       (partial process-invoke-eval '.)
     :create-fn        process-create-fn
     :invoke-fn        process-invoke-fn
     :invoke-def       process-invoke-def
     :invoke-throw     process-invoke-throw
     :invoke-do        process-invoke-do
+    :invoke-eval      process-invoke-eval
     :scalar           process-scalar
     :capture-state    process-capture-state
     :bind-name        process-bind-name

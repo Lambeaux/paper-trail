@@ -75,21 +75,19 @@
 ;; Generators: 'Callable' Primitives (run/compile time)
 ;; ------------------------------------------------------------------------------------------------
 
-(defn handle-new
-  [{:keys [form->commands] :as ctx} [_ & args :as _form]]
-  (with-form-wrappers [ctx 'new :special]
-    (with-stack-frame
-      (concat (mapcat form->commands (seq args))
-              (action->commands :invoke-new
-                :arg-count (count args))))))
+(defn handle-with-eval
+  ([op-sym context form]
+   (handle-with-eval op-sym :special context form))
+  ([op-sym op-type {:keys [form->commands] :as ctx} [_ & args :as _form]]
+   (with-form-wrappers [ctx op-sym op-type]
+     (with-stack-frame
+       (concat (mapcat form->commands (seq args))
+               (action->commands :invoke-eval
+                 :op op-sym
+                 :arg-count (count args)))))))
 
-(defn handle-dot
-  [{:keys [form->commands] :as ctx} [_ & args :as _form]]
-  (with-form-wrappers [ctx '. :special]
-    (with-stack-frame
-      (concat (mapcat form->commands (seq args))
-              (action->commands :invoke-dot
-                :arg-count (count args))))))
+(def handle-dot (partial handle-with-eval '.))
+(def handle-new (partial handle-with-eval 'new))
 
 (defn handle-interop-symbol
   [ctx form]
@@ -474,9 +472,7 @@
 ;; ------------------------------------------------------------------------------------------------
 
 (def form-handlers
-  {'.                (wrap-middleware handle-dot)
-   'new              (wrap-middleware handle-new)
-   'do               (wrap-middleware handle-do)
+  {'do               (wrap-middleware handle-do)
    'fn               (wrap-middleware handle-fn)
    'fn*              (wrap-middleware handle-fn)
    'def              (wrap-middleware handle-def)
@@ -485,6 +481,7 @@
    'let              (wrap-middleware handle-let)
    'let*             (wrap-middleware handle-let)
    'loop             (wrap-middleware handle-loop)
+   'loop*            (wrap-middleware handle-loop)
    'recur            (wrap-middleware handle-recur)
    'throw            (wrap-middleware handle-throw)
    'try              (wrap-middleware handle-try-catch-finally)
@@ -492,6 +489,15 @@
    'finally          (constantly nil)
    'var              (wrap-middleware handle-var)
    'quote            (wrap-middleware handle-quote)
+   ;; -------------------------------------------------------------------------
+   ;; Handled with eval (for now, will need to be improved later)
+   ;; -------------------------------------------------------------------------
+   '.                (wrap-middleware handle-dot)
+   'new              (wrap-middleware handle-new)
+   'set!             (wrap-middleware (partial handle-with-eval 'set!))
+   'monitor-enter    (wrap-middleware (partial handle-with-eval 'monitor-enter))
+   'monitor-exit     (wrap-middleware (partial handle-with-eval 'monitor-exit))
+   ;; -------------------------------------------------------------------------
    :type/symbol-qual (wrap-middleware handle-interop-symbol)
    :type/map         (wrap-middleware (partial handle-collection-literal :type/map))
    :type/vector      (wrap-middleware (partial handle-collection-literal :type/vector))
