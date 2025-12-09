@@ -7,9 +7,16 @@
 ;; You must not remove this notice, or any other, from this software.
 (ns user
   (:require [clojure.tools.namespace.repl :as tnr]
-            [lambeaux.paper-trail.repl :as r]))
+            [lambeaux.paper-trail.repl :as r]
+            [lambeaux.paper-trail.impl.generator :as ptg]))
 
 (r/require-pt)
+
+(defn unsupported-specials
+  "Just a handy util for tracking progress."
+  []
+  (let [special-syms (into #{} (keys (. clojure.lang.Compiler specials)))]
+    (apply disj special-syms (keys ptg/form-handlers))))
 
 (defn refresh []
   (r/with-std-out
@@ -26,6 +33,7 @@
       result)))
 
 (comment
+  (unsupported-specials)
   (refresh)
   (refresh-all))
 
