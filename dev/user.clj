@@ -11,6 +11,7 @@
             [lambeaux.paper-trail.impl.generator :as ptg]))
 
 (r/require-pt)
+(r/override-std-out)
 
 (defn unsupported-specials
   "Just a handy util for tracking progress."

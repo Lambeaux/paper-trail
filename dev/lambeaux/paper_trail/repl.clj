@@ -13,6 +13,10 @@
             [lambeaux.paper-trail.impl.generator :as ptg]
             [lambeaux.paper-trail.impl.executor :as pte]))
 
+;; ------------------------------------------------------------------------------------------------
+;; Repl: Standard Requires
+;; ------------------------------------------------------------------------------------------------
+
 (def default-thirdparty-requires
   ['[clojure.java.classpath :as jc]
    '[clojure.string :as str]
@@ -40,11 +44,26 @@
   (apply require (concat default-project-requires
                          default-thirdparty-requires)))
 
+;; ------------------------------------------------------------------------------------------------
+;; Repl: IO Redirection
+;; ------------------------------------------------------------------------------------------------
+
 (defmacro with-std-out
   [& body]
   `(binding [*out* (java.io.PrintWriter. System/out)
              *err* (java.io.PrintWriter. System/err)]
      ~@body))
+
+(defn override-std-out
+  []
+  (let [override-fn (fn [println*]
+                      (fn [& more]
+                        (with-std-out (apply println* more))))]
+    (alter-var-root #'println override-fn)))
+
+;; ------------------------------------------------------------------------------------------------
+;; Repl: Misc
+;; ------------------------------------------------------------------------------------------------
 
 (defn emit-msg*
   "Just a test fn for checking pt's invocation facilities."
