@@ -108,14 +108,6 @@
         :else
         {:event :scalar :value form}))
 
-(defn tiny-context
-  [{:keys [fn-idx] :as ctx}]
-  (let [fctx (get-in ctx [:fn-stack fn-idx])
-        commands (:commands fctx)]
-    (merge (select-keys ctx [:is-throwing? :is-finally?])
-           (select-keys fctx [:source-scope :call-stack-primary :call-stack-finally])
-           {:commands (take 15 commands)})))
-
 #_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (defmacro with-ex-val
   "Return an exception as if it was a value."
@@ -136,7 +128,7 @@
   ([form]
    (impl/evaluate form))
   ([idx form]
-   (tiny-context (impl/evaluate-to idx form))))
+   (model/tiny-context (impl/evaluate-to idx form))))
 
 #_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (defn spit-commands

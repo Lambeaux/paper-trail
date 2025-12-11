@@ -6,49 +6,14 @@
 ;; the terms of this license.
 ;; You must not remove this notice, or any other, from this software.
 (ns lambeaux.paper-trail.impl.executor.call-stack
-  (:require [lambeaux.paper-trail :as-alias pt])
-  (:import [clojure.lang IObj IPending]))
+  "The call stack is just a standard Clojure `(list)`. This will hold true for all `call-stack`
+   args for the functions in this namespace. It behaves, by convention, similarly to `this`."
+  (:require [lambeaux.paper-trail.impl.executor.boxed-vals :as b]
+            [lambeaux.paper-trail :as-alias pt]))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Call Stack: API
 ;; ------------------------------------------------------------------------------------------------
-
-(defn box-type [this] (. this boxType))
-(defn box-value [this] (. this boxValue))
-(defn box-meta [this] (. this boxMeta))
-
-(deftype StackBox [boxType boxValue boxMeta]
-  IObj
-  (meta [this]
-    (box-meta this))
-  (withMeta [this m]
-    (new StackBox (box-type this) (box-value this) m)))
-
-(defn new-box
-  ([bv] (new-box nil bv))
-  ([bt bv] (new StackBox bt bv nil)))
-
-(defmethod print-method StackBox
-  [this writer]
-  (if-let [box-val* (box-value this)]
-    (let [class-str (.getName (class box-val*))]
-      (.write writer (case (box-type this)
-                       :unrealized (str "#stack.unrealized[" class-str "]")
-                       :unhandled  (str "#stack.unhandled[" class-str "]")
-                       (str "#stack.val[" box-val* "]"))))
-    (.write writer "#stack.val[nil]")))
-
-(defn val->unrealized [v] (new-box :unrealized v))
-(defn val->unhandled [v] (new-box :unhandled v))
-
-(defn is-realized-val?
-  [obj]
-  (if (and (instance? StackBox obj)
-           (= :unrealized (box-type obj)))
-    false
-    (if-not (instance? IPending obj)
-      true
-      (realized? obj))))
 
 (defn is-stack-frame?
   [obj]
@@ -66,44 +31,27 @@
       (throw (IllegalStateException.
               (str "No valid stack frame to pop: " (pr-str call-stack)))))))
 
-(defn val-unwrap
-  [obj]
-  (if-not (instance? StackBox obj)
-    obj
-    (box-value obj)))
-
-;; TODO: when it comes to val->unhandled, probably update from 'Exception' to 'Throwable'
-(defn val-wrap
-  [obj]
-  (let [total-meta (merge {::pt/is-evaled? true} (meta obj))]
-    (with-meta
-      (cond
-        (not (is-realized-val? obj)) (val->unrealized obj)
-        (instance? Exception obj) (val->unhandled obj)
-        :else (new-box obj))
-      total-meta)))
-
 (defn peek-val
   [call-stack]
   (let [frame-or-val (peek call-stack)
         frame? (is-stack-frame? frame-or-val)]
     (if-not frame?
-      (val-unwrap frame-or-val)
-      (val-unwrap (peek frame-or-val)))))
+      (b/val-unwrap frame-or-val)
+      (b/val-unwrap (peek frame-or-val)))))
 
 (defn peek-frame
   [call-stack]
   (let [frame-or-val (peek call-stack)
         frame? (is-stack-frame? frame-or-val)]
     (if frame?
-      (mapv val-unwrap frame-or-val)
+      (mapv b/val-unwrap frame-or-val)
       (throw (IllegalStateException.
               (str "No valid stack frame to peek: " (pr-str call-stack)))))))
 
 (defn push-val
   [call-stack obj]
   (let [frame? (is-stack-frame? (peek call-stack))
-        result (val-wrap obj)]
+        result (b/val-wrap obj)]
     (if-not frame?
       (conj call-stack result)
       (conj (pop call-stack)

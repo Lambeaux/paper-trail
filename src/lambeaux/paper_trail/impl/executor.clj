@@ -6,12 +6,41 @@
 ;; the terms of this license.
 ;; You must not remove this notice, or any other, from this software.
 (ns lambeaux.paper-trail.impl.executor
-  (:require [lambeaux.paper-trail.impl.executor.call-stack :as stack]
+  (:require [lambeaux.paper-trail.impl.executor.boxed-vals :as b]
+            [lambeaux.paper-trail.impl.executor.call-stack :as stack]
             [lambeaux.paper-trail.impl.executor.data-model :as model]
             [lambeaux.paper-trail.impl.executor.middleware :as middleware]
             [lambeaux.paper-trail.impl.util :as ptu :refer [assert*]]
             [lambeaux.paper-trail :as-alias pt])
   (:import [clojure.lang IObj LazySeq ArityException]))
+
+;; ------------------------------------------------------------------------------------------------
+;; Processors: Diagnostics
+;; ------------------------------------------------------------------------------------------------
+
+(def ^:dynamic *enable-verbose-logging* (boolean false))
+(def ^:dynamic *enable-dev-mode* (boolean false))
+
+(defn debug-log
+  [& more]
+  (when *enable-verbose-logging*
+    (apply println more)))
+
+(defn ex-read
+  "In dev mode, some ex's are wrapped with ex-info so diagnostic and context data can travel
+   with the ex object, containing information only retrievable at the point the ex was thrown.
+   This means parity with Clojure is disabled because the incorrect exception class will be
+   propogated up the stack for any thrown exception."
+  [ex]
+  (if-not *enable-dev-mode*
+    ex
+    (ex-cause ex)))
+
+(defn ex-create
+  [ex data]
+  (if-not *enable-dev-mode*
+    ex
+    (ex-info (ex-message ex) data ex)))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Processors: Call Stack
@@ -68,7 +97,7 @@
   (let [call-stack (stack-find ctx)]
     (if (zero? fn-idx)
       (if is-throwing?
-        (throw throwing-ex)
+        (throw (ex-read throwing-ex))
         (stack/peek-val call-stack))
       (if is-throwing?
         (fn-stack-do-pop* ctx)
@@ -133,7 +162,7 @@
   (let [wrapped-vals (map #(if-not (and (instance? LazySeq %)
                                         (not (realized? %)))
                              %
-                             (stack/val->unrealized %))
+                             (b/val->unrealized %))
                           form)]
     (pr-str (apply list wrapped-vals))))
 
@@ -150,20 +179,25 @@
   [context form form-fn]
   ;; note: the form->str call is ESSENTIAL, otherwise printing triggers early realization of lazy
   ;;   seqs, which does not match Clojure's behavior.
-  (println "Invoke form: " (form->str form))
-  (let [[ex? result] (try
+  (debug-log "Invoke form: " (form->str form))
+  (let [{:keys [throwing-ex throwing-form is-throwing? is-finally? call-stack]} context
+        [ex? result] (try
                        (vector false (form-fn))
                        ;; todo: eventually support Throwable for more accurate results
                        (catch Exception e (vector true e)))
-        {:keys [throwing-ex throwing-form is-throwing? is-finally? call-stack]} context]
-    (-> context
-        (assoc :is-throwing?  (boolean (or is-throwing? ex?))
-               :is-finally?   (if ex? false  is-finally?)
-               :throwing-ex   (if ex? result throwing-ex)
-               :throwing-form (if ex? form   throwing-form))
-        (model/default-update [:call-stack (if ex?
-                                             call-stack
-                                             (stack/push-resolved-val call-stack result))]))))
+        context* (-> context
+                     (assoc :is-throwing?  (boolean (or is-throwing? ex?))
+                            :is-finally?   (if ex? false is-finally?)
+                            :throwing-form (if ex? form throwing-form))
+                     (model/default-update
+                      ;; note: dev mode modification of ex's should not impact the stack
+                      [:call-stack (if ex?
+                                     call-stack
+                                     (stack/push-resolved-val call-stack result))]))]
+    (assoc context*
+           :throwing-ex (if-not ex?
+                          throwing-ex
+                          (ex-create result (model/ex->data context* result true))))))
 
 ;; note: do not do any prep on lazy seqs, setting their meta realizes them
 ;; note: temporary limitation: for now, fns passed as arguments must be invoked as fn-in-execute 
@@ -213,13 +247,13 @@
 
 (defn process-invoke-throw
   [{:keys [call-stack] :as ctx}]
-  (-> ctx
-      (assoc
-       :is-throwing? true
-       :is-finally? false
-       :throwing-ex (stack/peek-val call-stack))
-      ;; todo: fix model/default-update's inability to handle an empty vector of kvs
-      (model/default-update [:call-stack call-stack])))
+  (let [ex   (stack/peek-val call-stack)
+        ctx* (-> ctx
+                 (assoc :is-throwing? true :is-finally? false)
+                 ;; todo: fix model/default-update's inability to handle an empty vector of kvs
+                 (model/default-update [:call-stack call-stack]))]
+    (assoc ctx*
+           :throwing-ex (ex-create ex (model/ex->data ctx* ex true)))))
 
 (defn process-invoke-do
   [{:keys [call-stack] [{:keys [convey-result?]}] :commands :as ctx}]
@@ -309,7 +343,7 @@
                        :command-value value
                        :call-stack (stack/peek-val call-stack)
                        :state (get state state-id))
-        val-to-bind  (if-not (stack/is-realized-val? val-to-bind)
+        val-to-bind  (if-not (b/is-realized-val? val-to-bind)
                        val-to-bind
                        (case val-to-bind
                          nil ::pt/nil
@@ -407,7 +441,7 @@
     [_ & cmds] :commands
     :as ctx}]
   (let [{:keys [catches] finally-commands :finally} (peek try-handlers)
-        catch-commands (find-catch throwing-ex catches)
+        catch-commands (find-catch (ex-read throwing-ex) catches)
         still-throwing? (boolean (when is-throwing? (not catch-commands)))
         ex-caught? (boolean (and is-throwing? (not still-throwing?)))]
     (-> ctx
@@ -418,7 +452,8 @@
                                :state    (if-not ex-caught?
                                            state
                                            ;; note: wanted to wrap the ex in a val->unhandled
-                                           (assoc state :caught-ex throwing-ex))]))))
+                                           ;; note: state should not be polluted with dev wrappers
+                                           (assoc state :caught-ex (ex-read throwing-ex)))]))))
 
 (defn process-finally
   [{:keys [fn-idx commands] :as ctx}]
@@ -500,13 +535,6 @@
 ;; ------------------------------------------------------------------------------------------------
 ;; Processors: Command Execution
 ;; ------------------------------------------------------------------------------------------------
-
-(def ^:dynamic *enable-verbose-logging* false)
-
-(defn debug-log
-  [msg]
-  (when *enable-verbose-logging*
-    (println msg)))
 
 ;; also consider wrapping exceptions we know should be thrown inside
 ;; ex-info's with attached metadata, then wrap the entire interpreter

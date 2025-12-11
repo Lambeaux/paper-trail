@@ -14,7 +14,7 @@
 ;; Processors: Middleware
 ;; ------------------------------------------------------------------------------------------------
 
-(def ^:dynamic *enable-verbose-logging* false)
+(def ^:dynamic *enable-verbose-logging* (boolean false))
 
 (defn wrap-verbose-logging
   [handler]
@@ -74,7 +74,7 @@
       (handler ctx)
       (catch Exception ex
         (throw (ex-info "Uncaught interpreter exception"
-                        {:ctx ctx :cause-data (ex-data ex)}
+                        (model/ex->data ctx ex)
                         ex))))))
 
 (defn wrap-command-middleware

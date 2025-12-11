@@ -6,23 +6,82 @@
 ;; the terms of this license.
 ;; You must not remove this notice, or any other, from this software.
 (ns lambeaux.paper-trail.impl.executor.data-model
-  (:require [lambeaux.paper-trail.impl.util :as ptu :refer [assert*]]))
+  (:require [lambeaux.paper-trail.impl.executor.boxed-vals :as b]
+            [lambeaux.paper-trail.impl.util :as ptu :refer [assert*]]))
+
+;; ------------------------------------------------------------------------------------------------
+;; Data Model: Execution Context Summary
+;; ------------------------------------------------------------------------------------------------
+
+(def default-keys
+  [:ns-sym
+   #_:extracted-defs
+   #_:reports
+   :cmd-counter
+   :fn-idx
+   #_:fn-stack
+   #_:try-handlers
+   :is-throwing?
+   :is-finally?
+   #_:throwing-ex
+   :throwing-form])
+
+(def default-fn-keys
+  [:ns-caller
+   :fn-meta
+   #_:commands
+   #_:command-history
+   :call-stack
+   #_:form-depth
+   #_:finally-depth
+   :source-scope
+   :impl-scope
+   :state])
+
+(defn tiny-context
+  "Creates a condensed view of an execution context."
+  ([ctx]
+   (tiny-context [] ctx))
+  ([more-keys {:keys [fn-idx] :as ctx}]
+   (let [{:keys [commands command-history] :as fctx} (get-in ctx [:fn-stack fn-idx])]
+     (merge (select-keys ctx (concat default-keys more-keys))
+            (select-keys fctx (concat default-fn-keys more-keys))
+            (let [[failed-command remaining] (take 6 commands)]
+              {:command-meta {:failed-command failed-command
+                              :preview-next remaining
+                              :preview-last (take 5 command-history)}})))))
+
+;; ------------------------------------------------------------------------------------------------
+;; Data Model: Exceptions
+;; ------------------------------------------------------------------------------------------------
+
+(defn ex-chain
+  [ex]
+  (->> (iterate ex-cause ex)
+       (take-while identity)
+       (mapv (fn [ex*]
+               {:ex-class   (class ex*)
+                :ex-message (ex-message ex*)
+                :ex-data    (ex-data ex*)}))))
+
+(defn ex->data
+  ([ctx ex]
+   (ex->data ctx ex false))
+  ([ctx ex expected?]
+   (assert (map? ctx) "ctx cannot be nil and must be a map")
+   (assert ex "ex cannot be nil")
+   (assert (boolean? expected?) "expected? cannot be nil and must be a boolean")
+   (let [{cause-expected? :expected? cause-context :context-full} (ex-data ex)
+         actual-expected (first (keep identity [cause-expected? expected?]))
+         actual-context  (first (keep identity [(b/box-value cause-context) ctx]))]
+     {:expected?    actual-expected
+      :context      (tiny-context actual-context)
+      :context-full (b/val->hidden actual-context)
+      :cause-chain  (ex-chain ex)})))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Data Model: Execution Context Builders
 ;; ------------------------------------------------------------------------------------------------
-
-(defn new-call-ctx
-  ([]
-   (new-call-ctx :fn-in-execute nil))
-  ([exec-ctx]
-   (new-call-ctx :fn-on-stack exec-ctx))
-  ([call-type exec-ctx]
-   {:call-type call-type
-    :fn-meta nil
-    :exec-ctx (when (= :fn-on-stack call-type)
-                (assert* (map? exec-ctx) "exec-ctx must be a map")
-                exec-ctx)}))
 
 (defn new-fn-ctx
   [ns-caller commands]
@@ -61,12 +120,25 @@
       :try-handlers (list)
       :is-throwing? false
       :is-finally? false
-      :throwing-ex nil})))
+      :throwing-ex nil
+      :throwing-form nil})))
 
 (def allowed-fn-keys (into #{} (keys (new-fn-ctx nil nil))))
 (def allowed-exec-keys (into #{} (keys (new-exec-ctx nil))))
 
 (ptu/disallow-overlap! allowed-exec-keys allowed-fn-keys)
+
+(defn new-call-ctx
+  ([]
+   (new-call-ctx :fn-in-execute nil))
+  ([exec-ctx]
+   (new-call-ctx :fn-on-stack exec-ctx))
+  ([call-type exec-ctx]
+   {:call-type call-type
+    :fn-meta nil
+    :exec-ctx (when (= :fn-on-stack call-type)
+                (assert* (map? exec-ctx) "exec-ctx must be a map")
+                exec-ctx)}))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Structs: Execution Context Updaters

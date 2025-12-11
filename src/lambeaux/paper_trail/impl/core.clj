@@ -11,8 +11,20 @@
             [lambeaux.paper-trail.impl.util :as ptu]
             [lambeaux.paper-trail.impl.classpath :as ptc]
             [lambeaux.paper-trail.impl.executor.data-model :as model]
+            [lambeaux.paper-trail.impl.executor.middleware :as middleware]
             [lambeaux.paper-trail :as-alias pt])
   (:import [clojure.lang IObj Compiler$CompilerException]))
+
+(defmacro with-flags
+  "Central point for aggregating opts/config so the user doesn't have to hunt for the
+   dynamic vars they need. Still debating if this gets supported long term."
+  [{:keys [verbose-log? dev-mode?] :as _flag-map} & body]
+  `(binding [pte/*enable-dev-mode* ~dev-mode?
+             pte/*enable-verbose-logging* ~verbose-log?
+             middleware/*enable-verbose-logging* ~verbose-log?]
+     ~@body))
+
+;; ------------------------------------------------------------------------------------------------
 
 (def default-line-or-column 0)
 
@@ -75,6 +87,8 @@
                            (map defmap->defpair)
                            (into {}))))))
 
+;; ------------------------------------------------------------------------------------------------
+
 (defonce ns-idx
   (delay (atom (ptc/ns-index))))
 
@@ -109,7 +123,7 @@
        (:reports)
        (mapv #(select-keys % [:form :result]))))
 
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
 
 (defn evaluate
   ([form]
@@ -147,7 +161,7 @@
           (into (with-meta [] {:portal.viewer/default
                                :portal.viewer/table}))))))
 
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
 
 (comment
   (evaluate '(+ 1 1))
