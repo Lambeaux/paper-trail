@@ -46,10 +46,8 @@
    (let [{:keys [commands command-history] :as fctx} (get-in ctx [:fn-stack fn-idx])]
      (merge (select-keys ctx (concat default-keys more-keys))
             (select-keys fctx (concat default-fn-keys more-keys))
-            (let [[failed-command remaining] (take 6 commands)]
-              {:command-meta {:failed-command failed-command
-                              :preview-next remaining
-                              :preview-last (take 5 command-history)}})))))
+            {:command-meta {:preview-next (take 5 commands)
+                            :preview-last (take 5 command-history)}}))))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Data Model: Exceptions

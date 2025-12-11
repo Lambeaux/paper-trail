@@ -45,15 +45,22 @@
 ;; (pr-str nil)
 (defn box->str
   [this]
-  (let [box-val* (box-value this)
-        meta-str (pr-str (box-meta this))]
-    (if (nil? box-val*)
-      (str "#box.val[nil " meta-str "]")
-      (let [class-str (.getName (class box-val*))
-            box-type* (box-type this)]
-        (if (special-box-type? box-type*)
-          (str "#box." (name box-type*) "[\"" class-str "\" " meta-str "]")
-          (str "#box.val[" box-val* " " meta-str "]"))))))
+  (let [box-type* (box-type this)
+        box-meta* (box-meta this)
+        box-val*  (box-value this)
+        class-str (when box-val*
+                    (.getName (class box-val*)))]
+    (cond
+      (nil? box-val*)
+      (str "#box.val"
+           (pr-str [nil box-meta*]))
+      (special-box-type? box-type*)
+      (str "#box."
+           (name box-type*)
+           (pr-str [class-str box-meta*]))
+      :else
+      (str "#box.val"
+           (pr-str [box-val* box-meta*])))))
 
 (defmethod print-method MetaBox
   [this writer]
