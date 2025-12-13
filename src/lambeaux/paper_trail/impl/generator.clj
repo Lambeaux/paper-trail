@@ -75,13 +75,41 @@
 ;; Generators: 'Callable' Primitives (run/compile time)
 ;; ------------------------------------------------------------------------------------------------
 
+(defn interop->commands
+  "Consider the unique nature of the dot operator. The object member being selected cannot be
+   dynamic in nature. Put another way, the object member must be known at compile time, and cannot
+   be calculated at runtime. For example, given the following, the expected result is returned:
+   ```
+   clj꞉user꞉> (. \"hello\" contains \"he\")
+   true
+   ```
+   But trying to dynamically generate the object member results in an error:
+   ```
+   clj꞉user꞉> (symbol \"contains\")
+   contains
+   clj꞉user꞉> (. \"hello\" (symbol \"contains\") \"he\")
+   ; Execution error (IllegalArgumentException) at user/eval49517 (REPL:831).
+   ; No matching method symbol found taking 1 args for class java.lang.String
+   clj꞉user꞉> (. \"hello\" 'contains \"he\")
+   ; Syntax error compiling at (.calva/output-window/output.calva-repl:835:1).
+   ; Unable to resolve symbol: contains in this context
+   ```
+   Thus, the `:eval?` property of the object member should be `false`."
+  [form->commands op-sym args-form]
+  (let [[obj* member* & args-interop] args-form]
+    (if-not (= '. op-sym)
+      (mapcat form->commands (seq args-form))
+      (concat (form->commands obj*)
+              (action->commands :scalar :form member* :eval? false)
+              (mapcat form->commands (seq args-interop))))))
+
 (defn handle-with-eval
   ([op-sym context form]
    (handle-with-eval op-sym :special context form))
   ([op-sym op-type {:keys [form->commands] :as ctx} [_ & args :as _form]]
    (with-form-wrappers [ctx op-sym op-type]
      (with-stack-frame
-       (concat (mapcat form->commands (seq args))
+       (concat (interop->commands form->commands op-sym args)
                (action->commands :invoke-eval
                  :op op-sym
                  :arg-count (count args)))))))
