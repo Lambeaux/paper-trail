@@ -9,9 +9,9 @@
   (:require [lambeaux.paper-trail.wip.interop-proto :as proto]
             [lambeaux.paper-trail :as-alias pt]))
 
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
 ;; LIST HELPERS
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
 
 (defn collcat*
   [f & args]
@@ -44,9 +44,9 @@
   [x]
   `(expand* ~x))
 
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
 ;; CLOJURE IFN GENERATION
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
 
 ;; look at clojure/lang/IFn.java to see where this constant came from
 ;; it's the max number of args, excluding the variadic array
@@ -102,9 +102,9 @@
        clojure.lang.IFn
        ~@ifn-impl)))
 
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
 ;; FN PROTOS / RECORDS
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
 
 (comment
   #{java.io.Serializable
@@ -121,9 +121,9 @@
   proto/InterpretedFn
   (call [_this _args] (throw (ex-info "Not implemented" {}))))
 
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
 ;; REFLECTIVE EXPLORATION / UTILS
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
 
 (def ->class-data
   "Get some interesting metadata for a given Java object."
@@ -149,23 +149,21 @@
   [obj]
   (into #{} (mapcat :interfaces (all-supers obj))))
 
-;; ----------------------------------------------------------------------------------------
-;; INTEROP NOTES
-;; ----------------------------------------------------------------------------------------
+;; ------------------------------------------------------------------------------------------------
+;; JAVA INTEROP NOTES (https://clojure.org/reference/java_interop)
+;; ------------------------------------------------------------------------------------------------
+;; CLASS INSTANCES
 
 (comment
-
-  "JAVA INTEROP NOTES, https://clojure.org/reference/java_interop"
-
-  "----------------------------------------------------------------------"
-
   "Random note for dynamically wrapping/generating defrecords. Class instances
    contain a ton of useful info, such as what interfaces the class implements."
   (select-keys (bean String)
-               [:simpleName :packageName :typeName :interfaces])
+               [:simpleName :packageName :typeName :interfaces]))
 
-  "---------- CLASS ACCESS ----------"
+;; ------------------------------------------------------------------------------------------------
+;; CLASS ACCESS
 
+(comment
   Object              "Classname - either from java.lang or imported package"
   java.util.Map       "fully qualified Classname - always valid"
   java.util.Map$Entry "Classname$InnerClass"
@@ -174,8 +172,12 @@
   ;; Object/1            "Classname/N - array type of N dimensions, added in 1.12"
   ;; int/1               "primitive/N - array type of N dimensions, added in 1.12"
 
-  "---------- MEMBER ACCESS ----------"
+  ())
 
+;; ------------------------------------------------------------------------------------------------
+;; MEMBER ACCESS
+
+(comment
   ;; The following 4 cases are handled by macroexpand
   (.contains "Hi there" "there")        "(.instanceMember instance args*)"
   ;; Not sure about the following case, are they trying to say you can access instance
@@ -189,10 +191,12 @@
   Math/PI                               "Classname/staticField"
 
   ;; This case works on 1.11.1, revisit in 1.12
-  (String/.contains "Hi there" "there") "(Classname/.instanceMethod instance args*), added in 1.12"
+  (String/.contains "Hi there" "there") "(Classname/.instanceMethod instance args*), added in 1.12")
 
-  "---------- INTERPRETER SUPPORT: SYMBOLS AS CLASSES ----------"
+;; ------------------------------------------------------------------------------------------------
+;; INTERPRETER SUPPORT: SYMBOLS AS CLASSES
 
+(comment
   (resolve 'Object)  "This works"
   (resolve 'Math)    "This works"
   (resolve 'Math/PI) "This does NOT work, use the below fns as ideas to resolve this"
@@ -227,33 +231,40 @@
 
   (resolve-field* 'Math/PI)
   (resolve-field* 'Math/E)
-  (resolve-field* 'System/out)
+  (resolve-field* 'System/out))
 
-  (binding [*out* (java.io.PrintWriter. System/out)]
-    (println "Math/PI Clojure:")
-    (time Math/PI)
-    (println)
-    (println "Math/PI Paper Trail:")
-    (time (resolve-field 'Math/PI))
-    (println)
-    (println "Math/PI Cached:")
-    (time (get {'Math/PI 3.141592653589793} 'Math/PI))
-    (println)
-    (println "Math/PI Dot Form:")
-    (time (. Math PI))
-    (println)
-    (println "Math/PI Dot Form Eval'd:")
-    (time (eval '(. Math PI)))
-    (println)
-    (println "String/contains Dot Form:")
-    (time (. "Hi there" contains "there"))
-    (println)
-    (println "String/contains memfn:")
-    (time ((memfn contains substr) "Hi there" "there"))
-    (println))
+;; ------------------------------------------------------------------------------------------------
+;; INTERPRETER SUPPORT: SYMBOLS AS CLASSES (some crude benchmarks)
 
-  "---------- INTERPRETER SUPPORT: DOT NOTATION ----------"
+(comment
+  (defmacro bench
+    [label form]
+    (let [binding (symbol "_")]
+      `(do (println "[Bench] " ~label)
+           (time (dotimes [~binding 100000] ~form))
+           (println))))
 
+  (set! *warn-on-reflection* true)
+
+  (binding [*out* (java.io.PrintWriter. System/out)
+            *err* (java.io.PrintWriter. System/err)
+            #_#_*warn-on-reflection* true]
+    (bench "Math/PI Clojure:"          Math/PI)
+    (bench "Math/PI Paper Trail:"      (resolve-field 'Math/PI))
+    (bench "Math/PI Cached:"           (get {'Math/PI 3.141592653589793} 'Math/PI))
+    (bench "Math/PI Dot Form:"         (. Math PI))
+    (bench "Math/PI Dot Form Eval'd:"  (eval '(. Math PI)))
+    (bench "String/contains Dot Form:" (. "Hi there" contains "there"))
+
+    (bench "String/contains memfn:"               ((memfn contains substr) "Hi there" "there"))
+    (bench "String/contains memfn w/ type hints:" ((memfn ^Boolean contains ^String substr) "Hi there" "there"))
+    (bench "String/toLower memfn:"                (mapv (memfn toLowerCase) ["A" "B" "C"]))
+    (bench "String/toLower memfn w/ type hint:"   (mapv (memfn ^String toLowerCase) ["A" "B" "C"]))))
+
+;; ------------------------------------------------------------------------------------------------
+;; INTERPRETER SUPPORT: DOT NOTATION
+
+(comment
   "Need to enhance the interpreter to support the dot special form: "
   (. "Hi there" contains "there")
 
@@ -279,3 +290,61 @@
 
   "...Take note: this expands correctly on 1.11.1, revisit on 1.12"
   (macroexpand '(String/.contains "Hi there" "there")))
+
+;; ------------------------------------------------------------------------------------------------
+;; INTERPRETER SUPPORT: DECONSTRUCTING DOT (https://clojure.org/reference/java_interop#dot)
+
+(comment
+  "There's a difference between eval-by-invoke and eval-by-compile."
+
+  "Delegating to (eval) in the interpreter is tricky because in some cases, to get parity with 
+   Clojure for interop cases, you don't want to 'interpret-eval' all the args to the dot operator."
+
+  "Here are some test cases, pulled directly from reading Clojure documentation:
+   https://clojure.org/reference/java_interop#dot"
+
+  (comment "Dash prefix is standard technique for field access:"
+           (. System -in)
+           "Note that, in the absence of a zero-arg public method, no dash is needed:"
+           (. System in))
+
+  (comment "Dot -> Static Field"
+           (. System -in)
+           (. System -out)
+
+           (. (identity System) -out) ;; error, expects class instance member
+           (let [clazz System] (. clazz -in)) ;; error, expects class instance member
+
+           (let [clazz System] (eval (list '. clazz '-in)))
+           (eval '(. System -in))
+
+           (let [clazz System]
+             (eval (list '. (list 'identity clazz) '-in))) ;; error, expects class instance member
+
+           ())
+
+  (comment "Dot -> Static Method"
+           (. String valueOf 10)
+           (eval '(. String valueOf 10))
+           (let [cx String] (eval (list '. cx 'valueOf 10)))
+
+           (. java.util.Map of)
+           (eval '(. java.util.Map of))
+           (let [cx java.util.Map] (eval (list '. cx 'of)))
+
+           (. java.util.Map of "key" "value")
+           (eval '(. java.util.Map of "key" "value"))
+           (let [cx java.util.Map] (eval (list '. cx 'of "key" "value")))
+
+           (. java.util.Map$Entry comparingByKey)
+           (eval '(. java.util.Map$Entry comparingByKey))
+           (let [cx java.util.Map$Entry] (eval (list '. cx 'comparingByKey))))
+
+  (comment "Dot -> Class Instance Member"
+           (. System getTypeName) ;; error
+           (. (identity System) getTypeName)
+           (. (identity (identity System)) getTypeName)
+           (let [obj System] (. obj getTypeName)))
+
+  (comment "Dot -> Instance Field")
+  (comment "Dot -> Instance Method"))
