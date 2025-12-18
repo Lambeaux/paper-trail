@@ -1,0 +1,30 @@
+// Clojure C-Style Syntax Primer
+// This is actually awful, but I'm looking to make a point
+
+(defn form->commands
+  [attrs form]
+  (if-not (coll? form)
+    (seq [{:cmd :scalar :form form}])
+    (let [h (or (get form-handlers (first form))
+                (get form-handlers (pts/classify form)))]
+      (if h
+        (lazy-seq (h attrs form))
+        (seq [{:cmd :not-implemented :form form}])))))
+
+// I think I might use both 'return' and 'return-val' so the
+// former can serve as short-circuiting behavior and the later won't
+defn form->commands 
+    [attrs form] {
+    if-not coll?(form) {
+        return-val = seq([{:cmd :scalar :form form}])
+    } else {
+        let [h or(get(form-handlers first(form))
+                  get(form-handlers pts/classify(form)))] {
+            if h {
+                return-val = lazy-seq(h(attrs form))
+            } else {
+                return-val = seq([{:cmd :not-implemented :form form}])
+            }
+        }
+    }
+}
