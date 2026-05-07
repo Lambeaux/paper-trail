@@ -220,6 +220,108 @@
                 :arg-count 1)))))
 
 ;; ------------------------------------------------------------------------------------------------
+;; Generators: Destructuring
+;; ------------------------------------------------------------------------------------------------
+
+(declare destruct-any)
+
+(defn destruct-map
+  ([binding-form]
+   (destruct-map [] binding-form))
+  ([path binding-form]
+   (let [[k v :as pair] (first (seq binding-form))
+         remaining-pairs (fn []
+                           (lazy-seq
+                            (destruct-map path (rest (seq binding-form)))))]
+     (when pair
+       (cond
+         ;; note: handles `{{...} :the-key}` or `{[...] :the-key}` forms
+         (or (map? k) (vector? k))
+         (concat (lazy-seq (destruct-any (conj path v) k))
+                 (remaining-pairs))
+         ;; note: handles the `{:as binding}` form
+         (= :as k)
+         (concat (action->commands :bind-name
+                   :bind-id v
+                   :path path)
+                 (remaining-pairs))
+         ;; note: associative special case
+         ;; note: handles `{:keys [x y z]}` or `{:qual/keys [x y z]}` forms
+         (= "keys" (name k))
+         (concat (map #(action->command :bind-name
+                         :bind-id (symbol (name %))
+                         :path (conj path (keyword (namespace k) (name %))))
+                      v)
+                 (remaining-pairs))
+         ;; note: handles default path `{bind1 :key1 bind2 :key2 ...}`
+         :else
+         (concat (action->commands :bind-name
+                   :bind-id k
+                   :path (conj path v))
+                 (remaining-pairs)))))))
+
+(defn destruct-seq
+  ([binding-form]
+   (destruct-seq [] binding-form))
+  ([path binding-form]
+   (destruct-seq path 0 binding-form))
+  ([path idx binding-form]
+   (let [form (first (seq binding-form))
+         remaining-forms (fn [idx*]
+                           (assert (> idx* idx) "idx* must be greater than idx")
+                           (lazy-seq
+                            (destruct-seq path idx* (->> (seq binding-form)
+                                                         (iterate rest)
+                                                         (take (inc (- idx* idx)))
+                                                         (last)))))]
+     (when form
+       (cond
+         ;; note: handles `[x y {...} z]` or `[x y [...] z]`
+         (or (map? form) (vector? form))
+         (concat (lazy-seq (destruct-any (conj path idx) form))
+                 (remaining-forms (inc idx)))
+         ;; note: handles `[:as coll]` or `[x y z :as coll]`
+         (= :as form)
+         (concat (action->commands :bind-name
+                   :bind-id (second form)
+                   :path path)
+                 (remaining-forms (+ 2 idx)))
+         ;; note: sequential special case / variadics / remaining
+         ;; note: handles variadic path `[& more]` or `[x y z & more]`
+         (= '& form)
+         (concat (action->commands :bind-name
+                   :bind-id (second form)
+                   :path path
+                   :variadic-drop idx)
+                 (remaining-forms (+ 2 idx)))
+         ;; note: handles default path `[x y z ...]`
+         :else
+         (concat (action->commands :bind-name
+                   :bind-id form
+                   :path (conj path idx))
+                 (remaining-forms (inc idx))))))))
+
+(defn destruct-any
+  ([binding-form]
+   (destruct-any [] binding-form))
+  ([path binding-form]
+   (cond
+     (map? binding-form)    (destruct-map path binding-form)
+     (vector? binding-form) (destruct-seq path binding-form)
+     :else                  (throw (ex-info (str "Unrecognized destructure type: "
+                                                 (pr-str binding-form))
+                                            (hash-map :path path :form binding-form))))))
+
+(defn binding-form
+  "Generate commands for any `binding-form` that adds bindings to scope."
+  [{:keys [in-macro?] :as _ctx} binding-form]
+  (if-not (symbol? binding-form)
+    (map #(assoc % :bind-from :call-stack :in-macro? in-macro?)
+         (destruct-any binding-form))
+    (action->commands :bind-name
+      :bind-id binding-form :bind-from :call-stack :in-macro? in-macro?)))
+
+;; ------------------------------------------------------------------------------------------------
 ;; Generators: Special Forms
 ;; ------------------------------------------------------------------------------------------------
 
