@@ -12,6 +12,11 @@
 
 (def some-local-var 1)
 
+(comment
+  (deftest test-intentional-failures
+    (t/testing "this should fail"
+      (t/is (= 2 (+ 1 3))))))
+
 (deftest ^:minimal test-core-fns
   (conf/forms->test "Test basic core functions"
     (+ 1 1)

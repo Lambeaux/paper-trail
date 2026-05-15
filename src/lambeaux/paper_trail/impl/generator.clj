@@ -24,51 +24,67 @@
   (code-form? form 'finally))
 
 (defn action->command
-  ([action]
-   (hash-map :action action))
-  ([action k v & kvs]
-   (apply hash-map (concat [:action action k v] kvs))))
+  ([{:keys [form-depth] :as _opts} action]
+   (hash-map :form-depth form-depth :action action))
+  ([{:keys [form-depth] :as _opts} action k v & kvs]
+   (apply hash-map (concat [:form-depth form-depth :action action k v] kvs))))
 
 (defn action->commands
-  ([action]
-   [(action->command action)])
-  ([action k v & kvs]
-   [(apply action->command (concat [action k v] kvs))]))
+  ([opts action]
+   [(action->command opts action)])
+  ([opts action k v & kvs]
+   [(apply action->command (concat [opts action k v] kvs))]))
+
+;; note: do we scrap this and just make `:form-depth` a standard attribute on every command?
+;; todo: check this impl, not a perfect sub-form filter, some sub-commands linger
+;; note: okay, I'm scrapping this, I'll keep it here as a reminder
+(comment
+  (defn commands-at-depth
+    "Filters `commands` to only the commands that belong to `depth`. Useful for a variety of
+     cases, such as removing name binds that belong to sub-forms."
+    [depth commands]
+    (let [depth->pred (fn [current-depth op]
+                        (fn [{:keys [form-depth]}]
+                          (or (nil? form-depth)
+                              (op current-depth form-depth))))
+          [taken remaining] (split-with (depth->pred depth =) commands)
+          [_ more] (split-with (depth->pred depth not=) remaining)]
+      (concat taken more))))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Generators: Command Wrappers
 ;; ------------------------------------------------------------------------------------------------
 
 (defn with-stack-frame
-  [command-seq]
-  (concat (action->commands :stack-push-frame)
+  [{:keys [command-opts] :as _ctx} command-seq]
+  (concat (action->commands command-opts :stack-push-frame)
           command-seq
-          (action->commands :stack-pop-frame)))
+          (action->commands command-opts :stack-pop-frame)))
 
 (defn with-implicit-do
-  ([command-seq]
-   (with-implicit-do true command-seq))
-  ([convey-result? command-seq]
-   (with-stack-frame (concat command-seq
-                             (action->commands :invoke-do :convey-result? convey-result?)))))
+  ([ctx command-seq]
+   (with-implicit-do ctx true command-seq))
+  ([{:keys [command-opts] :as ctx} convey-result? command-seq]
+   (with-stack-frame ctx
+     (concat command-seq
+             (action->commands command-opts :invoke-do :convey-result? convey-result?)))))
 
 (defn with-form-wrappers
   "Wraps a seq of commands with the :begin-form and :end-form commands."
-  [[{:keys [form-depth form-meta in-macro?] :as _ctx} operation* type*] command-seq]
-  (let [depth form-depth
-        op* (when (symbol? operation*) operation*)]
-    (concat (action->commands :begin-form
+  [[{:keys [command-opts form-meta in-macro?] :as _ctx} operation* type*] command-seq]
+  (let [op* (when (symbol? operation*) operation*)]
+    (concat (action->commands command-opts
+              :begin-form
               :op op*
               :type type*
               :form-meta form-meta
-              :form-depth depth
               :in-macro? in-macro?)
             command-seq
-            (action->commands :end-form
+            (action->commands command-opts
+              :end-form
               :op op*
               :type type*
               :form-meta form-meta
-              :form-depth depth
               :in-macro? in-macro?))))
 
 ;; ------------------------------------------------------------------------------------------------
@@ -95,22 +111,23 @@
    ; Unable to resolve symbol: contains in this context
    ```
    Thus, the `:eval?` property of the object member should be `false`."
-  [form->commands op-sym args-form]
+  [{:keys [command-opts form->commands] :as _ctx} op-sym args-form]
   (let [[obj* member* & args-interop] args-form]
     (if-not (= '. op-sym)
       (mapcat form->commands (seq args-form))
       (concat (form->commands obj*)
-              (action->commands :scalar :form member* :eval? false)
+              (action->commands command-opts :scalar :form member* :eval? false)
               (mapcat form->commands (seq args-interop))))))
 
 (defn handle-with-eval
   ([op-sym context form]
    (handle-with-eval op-sym :special context form))
-  ([op-sym op-type {:keys [form->commands] :as ctx} [_ & args :as _form]]
+  ([op-sym op-type {:keys [command-opts] :as ctx} [_ & args :as _form]]
    (with-form-wrappers [ctx op-sym op-type]
-     (with-stack-frame
-       (concat (interop->commands form->commands op-sym args)
-               (action->commands :invoke-eval
+     (with-stack-frame ctx
+       (concat (interop->commands ctx op-sym args)
+               (action->commands command-opts
+                 :invoke-eval
                  :op op-sym
                  :arg-count (count args)))))))
 
@@ -118,7 +135,7 @@
 (def handle-new (partial handle-with-eval 'new))
 
 (defn handle-interop-symbol
-  [ctx form]
+  [{:keys [command-opts] :as ctx} form]
   (if (and (qualified-symbol? form)
            (Character/isUpperCase (first (namespace form))))
     ;; note: cheeky interop shortcut so I can get a release out the door for feedback ASAP
@@ -128,10 +145,10 @@
       (handle-dot ctx (with-meta (list '. ns-sym name-sym)
                         (meta form))))
     ;; note: path for normal symbols
-    (action->commands :scalar :form form :eval? true)))
+    (action->commands command-opts :scalar :form form :eval? true)))
 
 (defn handle-invoke
-  [{:keys [form->commands] :as ctx} [fn-sym & args :as form]]
+  [{:keys [command-opts form->commands] :as ctx} [fn-sym & args :as form]]
   (if (and (qualified-symbol? fn-sym)
            (Character/isUpperCase (first (namespace fn-sym))))
     ;; note: cheeky interop shortcut so I can get a release out the door for feedback ASAP
@@ -142,28 +159,30 @@
                         (meta form))))
     ;; note: path for normal function invocation
     (with-form-wrappers [ctx fn-sym :fn]
-      (with-stack-frame
+      (with-stack-frame ctx
         (concat (mapcat form->commands (seq form))
-                (action->commands :invoke-fn
+                (action->commands command-opts
+                  :invoke-fn
                   :op (when (symbol? fn-sym) fn-sym)
                   :arg-count (count args)))))))
 
 (defn handle-do
   [{:keys [form->commands] :as ctx} form]
   (with-form-wrappers [ctx 'do :special]
-    (with-implicit-do
+    (with-implicit-do ctx
       (mapcat form->commands (rest form)))))
 
 (defn handle-def
-  [{:keys [form->commands ns-sym] :as ctx} form]
+  [{:keys [command-opts form->commands ns-sym] :as ctx} form]
   (let [[name-sym & more-args :as args] (rest form)]
     (with-form-wrappers [ctx 'def :special]
-      (with-stack-frame
-        (concat (action->commands :scalar
+      (with-stack-frame ctx
+        (concat (action->commands command-opts
+                  :scalar
                   :eval? false
                   :form (symbol (name ns-sym) (name name-sym)))
                 (mapcat form->commands more-args)
-                (action->commands :invoke-def :arg-count (count args)))))))
+                (action->commands command-opts :invoke-def :arg-count (count args)))))))
 
 (defn handle-macro
   [{:keys [->commands] :as ctx} form]
@@ -176,46 +195,52 @@
       (->commands (assoc ctx :in-macro? true) (macroexpand form*)))))
 
 (defn handle-collection-literal
-  [type-kw {:keys [form->commands] :as ctx} form]
+  [type-kw {:keys [command-opts form->commands] :as ctx} form]
   (with-form-wrappers [ctx type-kw :literal]
-    (with-stack-frame
+    (with-stack-frame ctx
       (let [coll-fn (case type-kw
                       :type/map    'hash-map
                       :type/set    'hash-set
                       :type/vector 'vector)]
-        (concat (action->commands :scalar
+        (concat (action->commands command-opts
+                  :scalar
                   :form coll-fn
                   :eval? true)
                 (mapcat form->commands
                         (if-not (= type-kw :type/map)
                           (seq form)
                           (apply concat (seq form))))
-                (action->commands :invoke-fn
+                (action->commands command-opts
+                  :invoke-fn
                   :op coll-fn
                   :arg-count (count form)))))))
 
 (defn handle-quote
-  [ctx [_quote-sym inner-form]]
+  [{:keys [command-opts] :as ctx} [_quote-sym inner-form]]
   (with-form-wrappers [ctx 'quote :special]
-    (action->commands :scalar
+    (action->commands command-opts
+      :scalar
       :form inner-form
       :eval? false)))
 
 (defn handle-var
-  [{:keys [ns-sym] :as ctx} [_var-sym inner-form]]
+  [{:keys [command-opts ns-sym] :as ctx} [_var-sym inner-form]]
   (assert (symbol? inner-form)
           (str "var expects a symbol but got " (class inner-form)))
   ;; (println "[...] Handle Var: ns-sym = " ns-sym " inner-form = " inner-form)
   ;; (println "[...] Handle Var: ns-qualified = " (ptu/ns-qualify-name ns-sym inner-form))
   (with-form-wrappers [ctx 'var :special]
-    (with-stack-frame
-      (concat (action->commands :scalar
+    (with-stack-frame ctx
+      (concat (action->commands command-opts
+                :scalar
                 :form 'find-var
                 :eval? true)
-              (action->commands :scalar
+              (action->commands command-opts
+                :scalar
                 :form (ptu/ns-qualify-name ns-sym inner-form)
                 :eval? false)
-              (action->commands :invoke-fn
+              (action->commands command-opts
+                :invoke-fn
                 :op 'find-var
                 :arg-count 1)))))
 
@@ -226,141 +251,164 @@
 (declare destruct-any)
 
 (defn destruct-map
-  ([binding-form]
-   (destruct-map [] binding-form))
-  ([path binding-form]
+  ([ctx binding-form]
+   (destruct-map ctx [] binding-form))
+  ([{:keys [command-opts] :as ctx} path binding-form]
    (let [[k v :as pair] (first (seq binding-form))
          remaining-pairs (fn []
                            (lazy-seq
-                            (destruct-map path (rest (seq binding-form)))))]
+                            (destruct-map ctx path (rest (seq binding-form)))))]
      (when pair
        (cond
          ;; note: handles `{{...} :the-key}` or `{[...] :the-key}` forms
          (or (map? k) (vector? k))
-         (concat (lazy-seq (destruct-any (conj path v) k))
+         (concat (lazy-seq (destruct-any ctx (conj path v) k))
                  (remaining-pairs))
          ;; note: handles the `{:as binding}` form
          (= :as k)
-         (concat (action->commands :bind-name
+         (concat (action->commands command-opts
+                   :bind-name
                    :bind-id v
                    :path path)
                  (remaining-pairs))
          ;; note: associative special case
          ;; note: handles `{:keys [x y z]}` or `{:qual/keys [x y z]}` forms
          (= "keys" (name k))
-         (concat (map #(action->command :bind-name
+         (concat (map #(action->command command-opts
+                         :bind-name
                          :bind-id (symbol (name %))
                          :path (conj path (keyword (namespace k) (name %))))
                       v)
                  (remaining-pairs))
          ;; note: handles default path `{bind1 :key1 bind2 :key2 ...}`
          :else
-         (concat (action->commands :bind-name
+         (concat (action->commands command-opts
+                   :bind-name
                    :bind-id k
                    :path (conj path v))
                  (remaining-pairs)))))))
 
+;; note: inc the idx difference because of iterate's first element
+(defn idx->rest
+  [binding-form idx-new idx-old]
+  (assert (> idx-new idx-old) "idx-new must be greater than idx-old")
+  (->> (seq binding-form)
+       (iterate rest)
+       (take (inc (- idx-new idx-old)))
+       (last)))
+
 (defn destruct-seq
-  ([binding-form]
-   (destruct-seq [] binding-form))
-  ([path binding-form]
-   (destruct-seq path 0 binding-form))
-  ([path idx binding-form]
+  ([ctx binding-form]
+   (destruct-seq ctx [] binding-form))
+  ([ctx path binding-form]
+   (destruct-seq ctx path 0 binding-form))
+  ([{:keys [command-opts] :as ctx} path idx binding-form]
    (let [form (first (seq binding-form))
          remaining-forms (fn [idx*]
-                           (assert (> idx* idx) "idx* must be greater than idx")
                            (lazy-seq
-                            (destruct-seq path idx* (->> (seq binding-form)
-                                                         (iterate rest)
-                                                         (take (inc (- idx* idx)))
-                                                         (last)))))]
+                            (destruct-seq ctx path idx* (idx->rest binding-form idx* idx))))]
      (when form
        (cond
          ;; note: handles `[x y {...} z]` or `[x y [...] z]`
          (or (map? form) (vector? form))
-         (concat (lazy-seq (destruct-any (conj path idx) form))
+         (concat (lazy-seq (destruct-any ctx (conj path idx) form))
                  (remaining-forms (inc idx)))
          ;; note: handles `[:as coll]` or `[x y z :as coll]`
          (= :as form)
-         (concat (action->commands :bind-name
+         (concat (action->commands command-opts
+                   :bind-name
                    :bind-id (second form)
                    :path path)
                  (remaining-forms (+ 2 idx)))
          ;; note: sequential special case / variadics / remaining
          ;; note: handles variadic path `[& more]` or `[x y z & more]`
          (= '& form)
-         (concat (action->commands :bind-name
+         (concat (action->commands command-opts
+                   :bind-name
                    :bind-id (second form)
                    :path path
                    :variadic-drop idx)
                  (remaining-forms (+ 2 idx)))
          ;; note: handles default path `[x y z ...]`
          :else
-         (concat (action->commands :bind-name
+         (concat (action->commands command-opts
+                   :bind-name
                    :bind-id form
                    :path (conj path idx))
                  (remaining-forms (inc idx))))))))
 
 (defn destruct-any
-  ([binding-form]
-   (destruct-any [] binding-form))
-  ([path binding-form]
+  ([ctx binding-form]
+   (destruct-any ctx [] binding-form))
+  ([ctx path binding-form]
    (cond
-     (map? binding-form)    (destruct-map path binding-form)
-     (vector? binding-form) (destruct-seq path binding-form)
+     (map? binding-form)    (destruct-map ctx path binding-form)
+     (vector? binding-form) (destruct-seq ctx path binding-form)
      :else                  (throw (ex-info (str "Unrecognized destructure type: "
                                                  (pr-str binding-form))
                                             (hash-map :path path :form binding-form))))))
 
-(defn binding-form
+(defn binding-form-commands
   "Generate commands for any `binding-form` that adds bindings to scope."
-  [{:keys [in-macro?] :as _ctx} binding-form]
+  [{:keys [command-opts in-macro?] :as ctx} binding-form]
   (if-not (symbol? binding-form)
     (map #(assoc % :bind-from :call-stack :in-macro? in-macro?)
-         (destruct-any binding-form))
-    (action->commands :bind-name
+         (destruct-any ctx binding-form))
+    (action->commands command-opts
+      :bind-name
       :bind-id binding-form :bind-from :call-stack :in-macro? in-macro?)))
+
+(defn with-name-bindings
+  "Wraps `command-seq` with the commands necessary to bind/unbind sym names to vals based on
+   the passed `bindings` arg which should be a bindings vector (e.g. found in `let`, `loop`, etc)."
+  [[{:keys [command-opts ->commands form-depth in-macro?] :as ctx} bindings] command-seq]
+  (let [bind-cmds   (mapcat (fn [[bform bval]]
+                              (with-stack-frame ctx
+                                (concat (->commands ctx bval)
+                                        (binding-form-commands ctx bform))))
+                            (partition 2 bindings))
+        unbind-cmds (->> bind-cmds
+                         (filter #(= form-depth (:form-depth %)))
+                         (filter #(= :bind-name (:action %)))
+                         (map (fn [{:keys [bind-id]}]
+                                (action->command command-opts
+                                  :unbind-name
+                                  :bind-id bind-id :in-macro? in-macro?))))]
+    (concat bind-cmds
+            command-seq
+            unbind-cmds)))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Generators: Special Forms
 ;; ------------------------------------------------------------------------------------------------
 
 (defn handle-if
-  [{:keys [form->commands] :as ctx} form]
+  [{:keys [command-opts form->commands] :as ctx} form]
   ;; TODO Investigate: if the repl remains alive for weeks, will we run out of gensyms?
   (let [id (gensym "if-")
         cond-pos (form->commands (first (drop 2 form)))
         cond-neg (form->commands (second (drop 2 form)))]
     (with-form-wrappers [ctx 'if :special]
       (concat (form->commands (second form))
-              (action->commands :capture-state :state-id id)
-              (action->commands :exec-when :state-id id :count (count cond-pos))
+              (action->commands command-opts :capture-state :state-id id)
+              (action->commands command-opts :exec-when :state-id id :count (count cond-pos))
               cond-pos
               (when cond-neg
-                (action->commands :skip-when :state-id id :count (count cond-neg)))
+                (action->commands command-opts :skip-when :state-id id :count (count cond-neg)))
               cond-neg))))
 
 (defn handle-let
-  [{:keys [form->commands in-macro?] :as ctx} form]
-  (let [bindings (partition 2 (second form))
+  [{:keys [form->commands] :as ctx} form]
+  (let [bindings (second form)
         body (drop 2 form)]
     ;; :op (first form) ??
     (with-form-wrappers [ctx 'let :special]
-      (concat (mapcat (fn [[bname bform]]
-                        (with-stack-frame
-                          (concat (form->commands bform)
-                                  (action->commands :bind-name
-                                    :bind-id bname :bind-from :call-stack :in-macro? in-macro?))))
-                      bindings)
-              (with-implicit-do
-                (mapcat form->commands body))
-              (mapcat (fn [[bname _]]
-                        (action->commands :unbind-name
-                          :bind-id bname :in-macro? in-macro?))
-                      bindings)))))
+      (with-name-bindings [ctx bindings]
+        (with-implicit-do ctx
+          (mapcat form->commands body))))))
 
 (defn handle-loop
-  [{:keys [->commands argdef-stack recur-idx in-macro?] :as ctx} form]
+  [{:keys [command-opts ->commands argdef-stack recur-idx in-macro?] :as ctx} form]
   ;; TODO: Need to double check this "stack local" form of incrementing recur-idx,
   ;; it means some idxs will be reused down the road (but it appears to be working just fine)
   (let [recur-idx (inc recur-idx)
@@ -372,42 +420,53 @@
                     :argdef-stack (conj argdef-stack argdefs))]
     (with-form-wrappers [ctx 'loop :special]
       (concat (mapcat (fn [[bname bform]]
-                        (with-stack-frame
+                        (with-stack-frame ctx
                           (concat (->commands ctx* bform)
-                                  (action->commands :bind-name
+                                  (action->commands command-opts
+                                    :bind-name
                                     :bind-id bname
                                     :bind-from :call-stack
                                     :in-macro? in-macro?))))
                       bindings)
-              (action->commands :recur-target :idx recur-idx :in-macro? in-macro?)
-              (with-implicit-do
+              (action->commands command-opts
+                :recur-target
+                :idx recur-idx :in-macro? in-macro?)
+              (with-implicit-do ctx
                 (mapcat (partial ->commands ctx*) body))
               (mapcat (fn [[bname _]]
-                        (action->commands :unbind-name :bind-id bname :in-macro? in-macro?))
+                        (action->commands command-opts
+                          :unbind-name
+                          :bind-id bname :in-macro? in-macro?))
                       bindings)))))
 
 (defn handle-recur
-  [{:keys [form->commands argdef-stack recur-idx in-macro?] :as ctx} form]
+  [{:keys [command-opts form->commands argdef-stack recur-idx in-macro?] :as ctx} form]
   (let [forms (rest form)
         ;; TODO Investigate: if the repl remains alive for weeks, will we run out of gensyms?
         state-keys (repeatedly (count forms) (fn [] (gensym "recur-")))]
     (with-form-wrappers [ctx 'recur :special]
       (concat (mapcat (fn [k form*]
                         (concat (form->commands form*)
-                                (action->commands :capture-state
+                                (action->commands command-opts
+                                  :capture-state
                                   :state-id k :in-macro? in-macro?)))
                       state-keys
                       forms)
               (mapcat (fn [k argdef]
-                        [(action->command :unbind-name :bind-id argdef :in-macro? in-macro?)
-                         (action->command :bind-name
+                        [(action->command command-opts
+                           :unbind-name
+                           :bind-id argdef :in-macro? in-macro?)
+                         (action->command command-opts
+                           :bind-name
                            :bind-id argdef
                            :bind-from :state
                            :state-id k
                            :in-macro? in-macro?)])
                       state-keys
                       (peek argdef-stack))
-              (action->commands :replay-commands :idx recur-idx :in-macro? in-macro?)))))
+              (action->commands command-opts
+                :replay-commands
+                :idx recur-idx :in-macro? in-macro?)))))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Generators: (fn ... ) Special Form
@@ -442,66 +501,73 @@
                     params)))))
 
 (defn load-fn-commands
-  [{:keys [->commands argdef-stack recur-idx in-macro?] :as ctx} metainf]
+  [{:keys [command-opts ->commands argdef-stack recur-idx in-macro?] :as ctx} metainf]
   (reduce (fn [accum k]
             (let [{:keys [argdefs body]} (get accum k)
                   ctx* (assoc ctx :argdef-stack (conj argdef-stack argdefs))
                   commands* (concat (map (fn [k argdef]
-                                           (action->command :bind-name
+                                           (action->command command-opts
+                                             :bind-name
                                              :bind-id argdef
                                              :bind-from :state
                                              :state-id k
                                              :in-macro? in-macro?))
                                          (map #(str "arg-" %) (range (count argdefs)))
                                          argdefs)
-                                    (action->commands :recur-target :idx recur-idx :in-macro? in-macro?)
-                                    (with-implicit-do (->commands ctx* body)))]
+                                    (action->commands command-opts
+                                      :recur-target
+                                      :idx recur-idx :in-macro? in-macro?)
+                                    (with-implicit-do ctx (->commands ctx* body)))]
               (update accum k #(assoc % :commands commands*))))
           metainf
           (keys metainf)))
 
 (defn handle-fn
-  [ctx form]
+  [{:keys [command-opts] :as ctx} form]
   (let [arity->metainf (load-fn-commands ctx (fnform->metainf form))]
     (with-form-wrappers [ctx 'fn :special]
-      (action->commands :create-fn :arities arity->metainf))))
+      (action->commands command-opts :create-fn :arities arity->metainf))))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Generators: (try ... ) / (throw ...) Special Forms
 ;; ------------------------------------------------------------------------------------------------
 
 (defn handle-throw
-  [{:keys [form->commands] :as ctx} form]
+  [{:keys [command-opts form->commands] :as ctx} form]
   (assert (= 2 (count form))
           "Invalid arguments to throw, expects single throwable instance")
   (with-form-wrappers [ctx 'throw :special]
-    (with-stack-frame
+    (with-stack-frame ctx
       (concat (form->commands (second form))
-              (action->commands :invoke-throw)))))
+              (action->commands command-opts :invoke-throw)))))
 
 (defn catch->cmds
-  [{:keys [form->commands in-macro?] :as ctx} ex-sym body]
+  [{:keys [command-opts form->commands in-macro?] :as ctx} ex-sym body]
   (with-form-wrappers [ctx 'catch :special]
-    (concat (action->commands :bind-name
+    (concat (action->commands command-opts
+              :bind-name
               :bind-id ex-sym :bind-from :state :state-id :caught-ex :in-macro? in-macro?)
-            (with-implicit-do
+            (with-implicit-do ctx
               (mapcat form->commands body))
-            (action->commands :unbind-name :bind-id ex-sym :in-macro? in-macro?))))
+            (action->commands command-opts
+              :unbind-name
+              :bind-id ex-sym :in-macro? in-macro?))))
 
 ;; Note: (finally) uses an implicit (do), but does not convey-result? of the (do) since
 ;; (finally) is only for executing side effects and not impacting return value
 (defn finally->cmds
-  [{:keys [form->commands] :as ctx} body]
+  [{:keys [command-opts form->commands] :as ctx} body]
   (with-form-wrappers [ctx 'finally :special]
-    (concat (action->commands :begin-finally)
-            (action->commands :set-context :props {:is-finally? true})
-            (with-implicit-do false
+    (concat (action->commands command-opts :begin-finally)
+            (action->commands command-opts :set-context :props {:is-finally? true})
+            (with-implicit-do ctx
+              false
               (mapcat form->commands body))
-            (action->commands :set-context :props {:is-finally? false})
-            (action->commands :end-finally))))
+            (action->commands command-opts :set-context :props {:is-finally? false})
+            (action->commands command-opts :end-finally))))
 
 (defn handle-try-catch-finally
-  [{:keys [form->commands in-macro?] :as ctx} form]
+  [{:keys [command-opts form->commands in-macro?] :as ctx} form]
   (let [args (rest form)
         finally* (let [finally? (last args)]
                    (when (finally-form? finally?) finally?))
@@ -510,7 +576,8 @@
         catches (drop-while (complement catch-form?) args*)
         id      (gensym "try-")]
     (with-form-wrappers [ctx 'try :special]
-      (concat (action->commands :setup-try
+      (concat (action->commands command-opts
+                :setup-try
                 :id id
                 :catches (mapv (fn [[op clazz-sym ex-sym & body]]
                                  (assert (= op 'catch) "Only catch statements allowed here")
@@ -524,8 +591,8 @@
                 :finally (when finally*
                            (finally->cmds ctx (rest finally*)))
                 :in-macro? in-macro?)
-              (with-implicit-do (mapcat form->commands body))
-              (action->commands :cleanup-try :id id :in-macro? in-macro?)))))
+              (with-implicit-do ctx (mapcat form->commands body))
+              (action->commands command-opts :cleanup-try :id id :in-macro? in-macro?)))))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Generators: Misc / Old / Outdated / Incomplete
@@ -576,11 +643,13 @@
 
 (defn wrap-form-details
   [handler]
-  (fn [ctx form]
-    (-> ctx
-        (assoc :form-meta (meta form))
-        (update :form-depth inc)
-        (handler form))))
+  (fn [{:keys [_command-opts] :as ctx} form]
+    (let [ctx* (-> ctx
+                   (update :form-depth inc)
+                   (assoc :form-meta (meta form)))]
+      (handler (assoc ctx* :command-opts
+                      (select-keys ctx* [:form-depth :form-meta :in-macro?]))
+               form))))
 
 (defn wrap-check-macro
   [handler]
@@ -641,16 +710,16 @@
 ;; ------------------------------------------------------------------------------------------------
 
 (defn ->commands
-  [context form]
+  [{:keys [command-opts] :as context} form]
   (if-not (coll? form)
     (if-let [h (get form-handlers (ptu/classify form))]
       (lazy-seq (h context form))
-      (seq (action->commands :scalar :form form :eval? true)))
+      (seq (action->commands command-opts :scalar :form form :eval? true)))
     (let [h (or (get form-handlers (first form))
                 (get form-handlers (ptu/classify form)))]
       (if h
         (lazy-seq (h context form))
-        (seq (action->commands :not-implemented :form form))))))
+        (seq (action->commands command-opts :not-implemented :form form))))))
 
 (defn new-generator-ctx
   []
@@ -660,6 +729,7 @@
    :argdef-stack (list)
    :form-depth -1
    :form-meta nil
+   :command-opts {}
    ;; TODO: replace recur-idx with an AtomicInteger since it is not consistently
    ;; being incremented everywhere
    ;; NOTE: Could just use an Atom and the return val of swap! so this is cross-platform
