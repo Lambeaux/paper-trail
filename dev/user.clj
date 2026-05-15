@@ -6,7 +6,8 @@
 ;; the terms of this license.
 ;; You must not remove this notice, or any other, from this software.
 (ns user
-  (:require [clojure.tools.namespace.repl :as tnr]
+  (:require [user.state :refer [tap-log]]
+            [clojure.tools.namespace.repl :as tnr]
             [lambeaux.paper-trail.repl :as r]
             [lambeaux.paper-trail.impl.generator :as ptg]))
 

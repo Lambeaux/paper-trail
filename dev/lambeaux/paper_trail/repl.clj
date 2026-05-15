@@ -7,6 +7,7 @@
 ;; You must not remove this notice, or any other, from this software.
 (ns lambeaux.paper-trail.repl
   (:require [clojure.pprint :as pp]
+            [clojure.test :as t]
             [lambeaux.paper-trail.impl.core :as impl]
             [lambeaux.paper-trail.impl.executor.data-model :as model]
             [lambeaux.paper-trail.impl.executor.middleware :as middleware]
@@ -22,6 +23,7 @@
    '[clojure.string :as str]
    '[clojure.java.io :as io]
    '[clojure.walk :as w]
+   '[clojure.test :as t]
    '[edamame.core :as ed]])
 
 (def default-project-requires
@@ -36,8 +38,9 @@
    '[lambeaux.paper-trail.impl.executor.data-model :as model]
    '[lambeaux.paper-trail.impl.executor.middleware :as middleware]
    '[lambeaux.paper-trail.conf-core :as conf]
-   '[lambeaux.paper-trail.wip.edamame :as wed]
-   '[lambeaux.paper-trail.wip.interop :as wiop]])
+   '[lambeaux.paper-trail.conf-test :as conf-test]
+   '[lambeaux.paper-trail.wip.edamame :as wip-ed]
+   '[lambeaux.paper-trail.wip.interop :as wip-iop]])
 
 (defn require-pt
   []
@@ -50,9 +53,12 @@
 
 (defmacro with-std-out
   [& body]
-  `(binding [*out* (java.io.PrintWriter. System/out)
-             *err* (java.io.PrintWriter. System/err)]
-     ~@body))
+  `(let [jvm-out# (java.io.PrintWriter. System/out)
+         jvm-err# (java.io.PrintWriter. System/err)]
+     (binding [*out* jvm-out#
+               *err* jvm-err#
+               t/*test-out* jvm-out#]
+       ~@body)))
 
 (defn override-std-out
   []
