@@ -8,6 +8,7 @@
 (ns lambeaux.paper-trail.repl
   (:require [clojure.pprint :as pp]
             [clojure.test :as t]
+            [clojure.string :as str]
             [lambeaux.paper-trail.impl.core :as impl]
             [lambeaux.paper-trail.impl.executor.data-model :as model]
             [lambeaux.paper-trail.impl.executor.middleware :as middleware]
@@ -34,6 +35,7 @@
    '[lambeaux.paper-trail.impl.generator :as ptg]
    '[lambeaux.paper-trail.impl.util :as ptu]
    '[lambeaux.paper-trail.impl.executor :as pte]
+   '[lambeaux.paper-trail.impl.executor.boxed-vals :as box]
    '[lambeaux.paper-trail.impl.executor.call-stack :as stack]
    '[lambeaux.paper-trail.impl.executor.data-model :as model]
    '[lambeaux.paper-trail.impl.executor.middleware :as middleware]
@@ -66,6 +68,53 @@
                       (fn [& more]
                         (with-std-out (apply println* more))))]
     (alter-var-root #'println override-fn)))
+
+;; ------------------------------------------------------------------------------------------------
+;; Repl: Capturing Test Failures
+;; ------------------------------------------------------------------------------------------------
+
+(def split-forms
+  "Sufficient enough for extracting/splitting valid forms from text."
+  (let [is-open?    (->> ["(" "[" "{"] (mapv first) (into #{}))
+        is-close?   (->> [")" "]" "}"] (mapv first) (into #{}))
+        char->state (fn [state-old char*]
+                      (println (pr-str {:state state-old :char char*}))
+                      (let [state-new           (cond-> state-old
+                                                  (is-open? char*)  (update :depth inc)
+                                                  (is-close? char*) (update :depth dec))
+                            form-opened?        (and (= 0 (:depth state-old))
+                                                     (= 1 (:depth state-new)))
+                            form-closed?        (and (= 1 (:depth state-old))
+                                                     (= 0 (:depth state-new)))
+                            space-outside-form? (and (zero? (:depth state-new))
+                                                     (= char* \space))]
+                        (cond
+                          (:force-next? state-new) (-> state-new
+                                                       (update :return-val not)
+                                                       (update :force-next? not))
+                          (< (:depth state-new) 0) (update state-new :depth (constantly 0))
+                          (> (:depth state-new) 0) (identity state-new)
+                          form-opened?             (update state-new :return-val not)
+                          form-closed?             (update state-new :force-next? not)
+                          space-outside-form?      (update state-new :return-val not)
+                          :else                    (identity state-new))))]
+    (fn [str-in]
+      (->> (seq str-in)
+           (partition-by (let [state (atom {:return-val false :force-next? false :depth 0})]
+                           (fn [char*] (:return-val (swap! state char->state char*)))))
+           (mapv (comp str/trim #(apply str %)))))))
+
+(comment
+  (->> (with-out-str
+         (binding [t/*test-out* *out*]
+           (t/run-all-tests)))
+       (str/split-lines)
+       (filterv (complement str/blank?))
+       (filterv #(or (str/starts-with? % "Testing lambeaux")
+                     (str/starts-with? % "FAIL in")
+                     (str/starts-with? % "Test ")
+                     (str/starts-with? % "expected: ")
+                     (str/starts-with? % "  actual: ")))))
 
 ;; ------------------------------------------------------------------------------------------------
 ;; Repl: Misc

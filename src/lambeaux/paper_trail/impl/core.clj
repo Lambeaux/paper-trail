@@ -139,27 +139,30 @@
   ([form]
    (evaluate-debug form identity))
   ([form xform]
-   (let [cmds (ptg/generate form)]
+   (let [update-meta (fn [obj k v]
+                       (if-not (and (instance? IObj obj)
+                                    (nil? (get (meta obj) k)))
+                         obj
+                         (vary-meta obj assoc k v)))
+         cmds (ptg/generate form)]
      (->> cmds
           (pte/ctx-seq)
           (map (fn [{:keys [fn-idx throwing-ex is-throwing? is-finally?] :as ctx}]
                  (-> (get-in ctx [:fn-stack fn-idx])
-                     (assoc
-                      :is-throwing? is-throwing?
-                      :is-finally? is-finally?
-                      :throwing-ex (boolean throwing-ex)))))
+                     (assoc :is-throwing? is-throwing?
+                            :is-finally? is-finally?
+                            :throwing-ex (boolean throwing-ex)))))
           (map (fn [{:keys [commands] :as ctx}]
                  (-> ctx
                      (assoc :next-command (first commands))
                      (dissoc :command-history :commands))))
           (map (fn [ctx]
-                 (update-vals ctx #(if-not (instance? IObj %)
-                                     %
-                                     (with-meta % {:portal.viewer/default
-                                                   :portal.viewer/pprint})))))
+                 (-> ctx
+                     (update :call-stack update-meta :portal.viewer/default :portal.viewer/pr-str)
+                     (update-vals #(update-meta % :portal.viewer/default :portal.viewer/pprint)))))
+          (map #(select-keys % [:call-stack :next-command :source-scope :state]))
           (xform)
-          (into (with-meta [] {:portal.viewer/default
-                               :portal.viewer/table}))))))
+          (into (with-meta [] {:portal.viewer/default :portal.viewer/table}))))))
 
 ;; ------------------------------------------------------------------------------------------------
 

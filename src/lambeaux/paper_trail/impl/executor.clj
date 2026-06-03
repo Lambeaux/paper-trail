@@ -337,11 +337,11 @@
 
 (defn process-bind-name
   [{:keys [state call-stack source-scope impl-scope]
-    [{:keys [bind-id bind-from in-macro? value state-id]} & _] :commands
+    [{:keys [bind-id bind-from path in-macro? value state-id]} & _] :commands
     :as ctx}]
   (let [val-to-bind  (case bind-from
                        :command-value value
-                       :call-stack (stack/peek-val call-stack)
+                       :call-stack (get-in (stack/peek-val call-stack) path)
                        :state (get state state-id))
         val-to-bind  (if-not (b/is-realized-val? val-to-bind)
                        val-to-bind
@@ -352,9 +352,11 @@
         keyval-pairs (if in-macro?
                        [:impl-scope (update impl-scope bind-id #(conj % val-to-bind))]
                        [:source-scope (update source-scope bind-id #(conj % val-to-bind))])]
+    ;; keyval-pairs 
     (model/default-update ctx (if (not= :call-stack bind-from)
                                 keyval-pairs
-                                (conj keyval-pairs :call-stack (stack/frame-pop call-stack))))))
+                                keyval-pairs
+                                #_(conj keyval-pairs :call-stack (stack/frame-pop call-stack))))))
 
 (defn process-unbind-name
   [{:keys [source-scope impl-scope]
@@ -616,18 +618,41 @@
         (stack-peek call-stack))
       seq*))
 
-(defn ctx-seq
-  [input]
+(def ctx-seq*
   (let [command-handlers (create-command-handlers)]
-    (cond
-      (seq? input)
-      (ctx-seq (model/new-exec-ctx input))
-      (map? input)
-      (cons input (lazy-seq
-                   (let [fctx (get-in input [:fn-stack (:fn-idx input)])
-                         h (get command-handlers
-                                (:action (first (:commands fctx))))]
-                     (when h
-                       (ctx-seq (h input))))))
-      :else
-      (throw (IllegalArgumentException. "Input must be seq or map")))))
+    (fn
+      ([ctx]
+       (ctx-seq* ctx (constantly false)))
+      ([{:keys [cmd-counter fn-idx] :as ctx} stop-early?]
+       (let [{:keys [commands] :as _fctx} (get-in ctx [:fn-stack fn-idx])
+             idx (inc @cmd-counter)
+             action (:action (first commands))
+             handler (get command-handlers action)]
+         (cons ctx
+               (lazy-seq
+                (when-not (or (:halt ctx) (stop-early? idx))
+                  (cond
+                    handler      (do (debug-log "Execute Pivot = Handler")
+                                     (ctx-seq* (handler ctx) stop-early?))
+                    (> fn-idx 0) (do (debug-log "Execute Pivot = Pop Stack")
+                                     (ctx-seq* (fn-stack-pop ctx) stop-early?))
+                    :else        (do (debug-log "Execute Pivot = Context")
+                                     (ctx-seq* (assoc ctx :halt true) stop-early?)))))))))))
+
+(defn ctx-seq
+  ([input]
+   (ctx-seq input nil))
+  ([input stop-idx]
+   (cond
+     ;; note: I assume a sequential? input is a coll of commands
+     (sequential? input)
+     (ctx-seq (model/new-exec-ctx input) stop-idx)
+     ;; note: I assume a map? input is a context
+     (map? input)
+     (let [stop-early? (if (and (int? stop-idx)
+                                (or (zero? stop-idx) (pos-int? stop-idx)))
+                         (partial <= stop-idx)
+                         (constantly false))]
+       (ctx-seq* input stop-early?))
+     :else
+     (throw (IllegalArgumentException. "Input must be seq or map")))))

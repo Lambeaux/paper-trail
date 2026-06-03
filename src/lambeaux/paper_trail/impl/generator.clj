@@ -317,7 +317,7 @@
          (= :as form)
          (concat (action->commands command-opts
                    :bind-name
-                   :bind-id (second form)
+                   :bind-id (second (seq binding-form))
                    :path path)
                  (remaining-forms (+ 2 idx)))
          ;; note: sequential special case / variadics / remaining
@@ -325,7 +325,7 @@
          (= '& form)
          (concat (action->commands command-opts
                    :bind-name
-                   :bind-id (second form)
+                   :bind-id (second (seq binding-form))
                    :path path
                    :variadic-drop idx)
                  (remaining-forms (+ 2 idx)))
